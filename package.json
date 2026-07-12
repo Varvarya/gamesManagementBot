@@ -1,0 +1,23 @@
+{
+  "name": "gamesBot",
+  "version": "1.0.0",
+  "description": "",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "node-schedule": "^2.1.1",
+    "telegraf": "^4.16.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "@types/node-schedule": "^2.1.8",
+    "tsx": "^4.23.0",
+    "typescript": "^5.5.3"
+  },
+  "private": true
+}
