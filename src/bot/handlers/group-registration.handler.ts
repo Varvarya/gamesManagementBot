@@ -64,6 +64,9 @@ export class GroupRegistrationHandler {
                     });
 
             await this.publisher.refreshMessage(training.id);
+            await this.deleteActionMessageIfEnabled(
+                ctx,
+            );
         } catch (error) {
             // У групу нічого не відправляємо.
             // Пізніше тут буде ignored action log.
@@ -84,5 +87,38 @@ export class GroupRegistrationHandler {
             action: match[1] as '+' | '-',
             places: Number(match[2]),
         };
+    }
+
+    private async deleteActionMessageIfEnabled(
+        ctx: Context,
+    ): Promise<void> {
+        const settings =
+            await this.services.repositories.settings.get();
+
+        if (!settings.cleanChatMode) {
+            return;
+        }
+
+        const messageId =
+            ctx.message?.message_id;
+
+        const chatId =
+            ctx.chat?.id;
+
+        if (!messageId || !chatId) {
+            return;
+        }
+
+        try {
+            await ctx.telegram.deleteMessage(
+                chatId,
+                messageId,
+            );
+        } catch (error) {
+            console.error(
+                'Failed to delete registration message:',
+                error,
+            );
+        }
     }
 }

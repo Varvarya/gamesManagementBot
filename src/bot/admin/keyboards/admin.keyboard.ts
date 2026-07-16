@@ -92,7 +92,7 @@ export function createTemplateKeyboard(
         [
             Markup.button.callback(
                 '✏️ Редагувати',
-                `${AdminCallbacks.EditTemplatePrefix}${template.id}`,
+                `${AdminCallbacks.TemplateEditPrefix}${template.id}`,
             ),
         ],
         [

@@ -2,12 +2,12 @@ export type AdminFlowState =
     | 'idle'
     | 'waiting_template_quick_input'
     | 'waiting_template_edit_input'
-    | 'waiting_config_import'
     | 'waiting_player_name'
+    | 'waiting_new_player_name'
     | 'waiting_training_add_player'
     | 'waiting_training_remove_player'
-    | 'waiting_new_player_name';
-
+    | 'waiting_cancel_check_hours'
+    | 'waiting_config_import';
 
 export type PendingTemplate = {
     title: string;
@@ -28,8 +28,6 @@ export type AdminFlowData = {
     templateId?: string;
     playerId?: string;
     trainingId?: string;
-
-    editingField?: keyof PendingTemplate;
 
     pendingTemplate?: PendingTemplate;
     pendingImport?: unknown;

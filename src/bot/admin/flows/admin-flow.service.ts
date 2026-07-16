@@ -2,62 +2,41 @@ import {
     AdminFlowData,
     AdminFlowState,
     AdminSession,
-} from '../admin-flow.types';
+} from './admin-flow.types';
 
 export class AdminFlowService {
-    private readonly sessions = new Map<number, AdminSession>();
+    private readonly sessions =
+        new Map<number, AdminSession>();
 
-    getSession(telegramUserId: number): AdminSession {
-        const existing = this.sessions.get(telegramUserId);
+    getSession(
+        telegramUserId: number,
+    ): AdminSession {
+        const existing =
+            this.sessions.get(telegramUserId);
 
         if (existing) {
             return existing;
         }
 
-        const session: AdminSession = {
+        return this.reset(telegramUserId);
+    }
+
+    getState(
+        telegramUserId: number,
+    ): AdminFlowState {
+        return this.getSession(
             telegramUserId,
-            state: 'idle',
-            data: {},
-        };
-
-        this.sessions.set(telegramUserId, session);
-
-        return session;
+        ).state;
     }
 
-    getState(telegramUserId: number): AdminFlowState {
-        return this.getSession(telegramUserId).state;
-    }
-
-    getData(telegramUserId: number): AdminFlowData {
+    getData(
+        telegramUserId: number,
+    ): AdminFlowData {
         return {
-            ...this.getSession(telegramUserId).data,
+            ...this.getSession(
+                telegramUserId,
+            ).data,
         };
-    }
-
-    setState(
-        telegramUserId: number,
-        state: AdminFlowState,
-    ): AdminSession {
-        const session = this.getSession(telegramUserId);
-
-        session.state = state;
-
-        return session;
-    }
-
-    setData(
-        telegramUserId: number,
-        data: Partial<AdminFlowData>,
-    ): AdminSession {
-        const session = this.getSession(telegramUserId);
-
-        session.data = {
-            ...session.data,
-            ...data,
-        };
-
-        return session;
     }
 
     transition(
@@ -65,7 +44,8 @@ export class AdminFlowService {
         state: AdminFlowState,
         data?: Partial<AdminFlowData>,
     ): AdminSession {
-        const session = this.getSession(telegramUserId);
+        const session =
+            this.getSession(telegramUserId);
 
         session.state = state;
 
@@ -79,19 +59,35 @@ export class AdminFlowService {
         return session;
     }
 
-    reset(telegramUserId: number): AdminSession {
+    setData(
+        telegramUserId: number,
+        data: Partial<AdminFlowData>,
+    ): AdminSession {
+        const session =
+            this.getSession(telegramUserId);
+
+        session.data = {
+            ...session.data,
+            ...data,
+        };
+
+        return session;
+    }
+
+    reset(
+        telegramUserId: number,
+    ): AdminSession {
         const session: AdminSession = {
             telegramUserId,
             state: 'idle',
             data: {},
         };
 
-        this.sessions.set(telegramUserId, session);
+        this.sessions.set(
+            telegramUserId,
+            session,
+        );
 
         return session;
-    }
-
-    remove(telegramUserId: number): void {
-        this.sessions.delete(telegramUserId);
     }
 }

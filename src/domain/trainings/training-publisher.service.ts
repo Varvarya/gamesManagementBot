@@ -112,10 +112,17 @@ export class TrainingPublisherService {
             text,
         );
 
-        return this.trainings.publish({
-            trainingId: training.id,
-            messageId: message.message_id,
-        });
+        const published =
+            await this.trainings.publish({
+                trainingId: training.id,
+                messageId: message.message_id,
+            });
+
+        if (this.onPublished) {
+            await this.onPublished(published);
+        }
+
+        return published;
     }
 
     private async render(training: Training): Promise<string> {
@@ -135,5 +142,44 @@ export class TrainingPublisherService {
         return error.message.includes(
             'message is not modified',
         );
+    }
+
+    async refreshMessagesForPlayer(
+        playerId: string,
+    ): Promise<void> {
+        const trainings =
+            await this.repositories.trainings.listActive();
+
+        const relatedTrainings = trainings.filter(
+            (training) =>
+                training.participants.some(
+                    (participant) =>
+                        participant.playerId === playerId,
+                ) ||
+                training.waitlist.some(
+                    (participant) =>
+                        participant.playerId === playerId,
+                ),
+        );
+
+        for (const training of relatedTrainings) {
+            if (!training.messageId) {
+                continue;
+            }
+
+            await this.refreshMessage(training.id);
+        }
+    }
+
+    private onPublished?: (
+        training: Training,
+    ) => Promise<void>;
+
+    setOnPublished(
+        callback: (
+            training: Training,
+        ) => Promise<void>,
+    ): void {
+        this.onPublished = callback;
     }
 }

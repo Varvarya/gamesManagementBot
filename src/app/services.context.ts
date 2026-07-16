@@ -7,6 +7,7 @@ import { SchedulerService } from '../scheduler/scheduler.service';
 import { RepositoriesContext } from './repositories.context';
 import { TemplateService } from '../domain/templates/template.service';
 import { AdminFlowService } from '../bot/admin/flows/admin-flow.service';
+import { AdminUi } from '../bot/admin/ui/admin-ui';
 
 export class ServicesContext {
     readonly repositories: RepositoriesContext;
@@ -19,6 +20,8 @@ export class ServicesContext {
     readonly scheduler: SchedulerService;
     readonly templates: TemplateService;
     readonly adminFlow: AdminFlowService;
+
+    readonly adminUi: AdminUi;
 
     constructor(repositories: RepositoriesContext) {
         this.repositories = repositories;
@@ -41,5 +44,7 @@ export class ServicesContext {
         this.trainingMessageRenderer = new TrainingMessageRenderer();
 
         this.scheduler = new SchedulerService(this.trainings);
+
+        this.adminUi = new AdminUi();
     }
 }
