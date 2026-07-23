@@ -1,12 +1,12 @@
 import { Context } from 'telegraf';
 import { ServicesContext } from '../../../app/services.context';
-import { Player } from '../../../domain/players/player.types';
 import { AdminCallbacks } from '../callbacks/admin-callbacks';
 import {
     createPlayerKeyboard,
     createPlayerListKeyboard,
     createPlayersKeyboard,
 } from '../keyboards/player.keyboard';
+import { renderPlayerCard } from '../ui/admin-formatters';
 
 export class AdminPlayerHandler {
     constructor(
@@ -16,12 +16,9 @@ export class AdminPlayerHandler {
     canHandle(callback: string): boolean {
         return (
             callback === AdminCallbacks.Players ||
-            callback ===
-            AdminCallbacks.UnconfirmedPlayers ||
+            callback === AdminCallbacks.UnconfirmedPlayers ||
             callback === AdminCallbacks.AllPlayers ||
-            callback.startsWith(
-                AdminCallbacks.PlayerPrefix,
-            )
+            callback.startsWith(AdminCallbacks.PlayerPrefix)
         );
     }
 
@@ -34,10 +31,7 @@ export class AdminPlayerHandler {
             return;
         }
 
-        if (
-            callback ===
-            AdminCallbacks.UnconfirmedPlayers
-        ) {
+        if (callback === AdminCallbacks.UnconfirmedPlayers) {
             await this.showUnconfirmed(ctx);
             return;
         }
@@ -62,11 +56,16 @@ export class AdminPlayerHandler {
         const unconfirmed =
             await this.services.repositories.players.listUnconfirmed();
 
-        await ctx.editMessageText(
+        await this.services.adminUi.show(
+            ctx,
             [
                 '👥 Гравці',
                 '',
-                `⚠️ Очікують підтвердження: ${unconfirmed.length}`,
+                unconfirmed.length > 0
+                    ? `⚠️ Очікують підтвердження: ${unconfirmed.length}`
+                    : '✅ Усі імена підтверджені',
+                '',
+                'Оберіть потрібний розділ',
             ].join('\n'),
             createPlayersKeyboard(
                 unconfirmed.length,
@@ -80,8 +79,15 @@ export class AdminPlayerHandler {
         const players =
             await this.services.repositories.players.listUnconfirmed();
 
-        await ctx.editMessageText(
-            '⚠️ Непідтверджені гравці',
+        await this.services.adminUi.show(
+            ctx,
+            [
+                '⚠️ Непідтверджені гравці',
+                '',
+                players.length > 0
+                    ? 'Оберіть гравця, щоб підтвердити або змінити імʼя'
+                    : 'Усі гравці вже підтверджені',
+            ].join('\n'),
             createPlayerListKeyboard(players),
         );
     }
@@ -92,15 +98,24 @@ export class AdminPlayerHandler {
         const players =
             await this.services.repositories.players.list();
 
-        players.sort((a, b) =>
-            a.displayName.localeCompare(
-                b.displayName,
+        players.sort((first, second) =>
+            first.displayName.localeCompare(
+                second.displayName,
                 'uk',
             ),
         );
 
-        await ctx.editMessageText(
-            `👥 Всі гравці\n\nГравців: ${players.length}`,
+        await this.services.adminUi.show(
+            ctx,
+            [
+                '👥 Усі гравці',
+                '',
+                `Всього: ${players.length}`,
+                '',
+                players.length > 0
+                    ? 'Оберіть гравця'
+                    : 'Список поки порожній',
+            ].join('\n'),
             createPlayerListKeyboard(players),
         );
     }
@@ -120,35 +135,10 @@ export class AdminPlayerHandler {
             );
         }
 
-        await ctx.editMessageText(
-            this.render(player),
+        await this.services.adminUi.show(
+            ctx,
+            renderPlayerCard(player),
             createPlayerKeyboard(player),
         );
-    }
-
-    private render(player: Player): string {
-        return [
-            `${
-                player.isConfirmed
-                    ? '👤'
-                    : '⚠️'
-            } ${player.displayName}`,
-            '',
-            player.telegramName
-                ? `Telegram name: ${player.telegramName}`
-                : undefined,
-            player.username
-                ? `Telegram: @${player.username}`
-                : undefined,
-            '',
-            player.isConfirmed
-                ? '✅ Імʼя підтверджено'
-                : '⚠️ Імʼя потрібно підтвердити',
-        ]
-            .filter(
-                (value): value is string =>
-                    value !== undefined,
-            )
-            .join('\n');
     }
 }

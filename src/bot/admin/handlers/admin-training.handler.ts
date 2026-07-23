@@ -8,13 +8,16 @@ import {
     createTrainingCancelKeyboard,
     createTrainingKeyboard,
 } from '../keyboards/training.keyboard';
-import {TrainingCancellationScheduler} from "../../../scheduler/training-cancellation.scheduler";
+import {
+    formatDate,
+    formatTimeRange,
+    renderTrainingCard,
+} from '../ui/admin-formatters';
 
 export class AdminTrainingHandler {
     constructor(
         private readonly services: ServicesContext,
         private readonly publisher: TrainingPublisherService,
-        private readonly cancellationScheduler: TrainingCancellationScheduler,
     ) {}
 
     canHandle(callback: string): boolean {
@@ -30,14 +33,11 @@ export class AdminTrainingHandler {
         ctx: Context,
         callback: string,
     ): Promise<void> {
-        if (!ctx.from) {
-            return;
-        }
-
         if (
-            callback === AdminCallbacks.ActiveTrainings
+            callback ===
+            AdminCallbacks.ActiveTrainings
         ) {
-            await this.showActive(ctx);
+            await this.showList(ctx);
             return;
         }
 
@@ -46,258 +46,132 @@ export class AdminTrainingHandler {
                 AdminCallbacks.TrainingCancelConfirmPrefix,
             )
         ) {
-            const id = this.getId(
-                callback,
-                AdminCallbacks.TrainingCancelConfirmPrefix,
+            await this.cancel(
+                ctx,
+                callback.replace(
+                    AdminCallbacks.TrainingCancelConfirmPrefix,
+                    '',
+                ),
+            );
+            return;
+        }
+
+        if (
+            callback.startsWith(
+                AdminCallbacks.TrainingCancelPrefix,
+            )
+        ) {
+            await this.confirmCancel(
+                ctx,
+                callback.replace(
+                    AdminCallbacks.TrainingCancelPrefix,
+                    '',
+                ),
+            );
+            return;
+        }
+
+        if (
+            callback.startsWith(
+                AdminCallbacks.TrainingRefreshPrefix,
+            )
+        ) {
+            const trainingId = callback.replace(
+                AdminCallbacks.TrainingRefreshPrefix,
+                '',
             );
 
-            const training =
-                await this.services.trainings.cancel(id);
+            await this.publisher.refreshMessage(
+                trainingId,
+            );
 
-            this.cancellationScheduler.cancel(
+            await this.show(ctx, trainingId);
+            return;
+        }
+
+        if (
+            callback.startsWith(
+                AdminCallbacks.TrainingClosePrefix,
+            )
+        ) {
+            const training =
+                await this.services.trainings.close(
+                    callback.replace(
+                        AdminCallbacks.TrainingClosePrefix,
+                        '',
+                    ),
+                );
+
+            await this.publisher.refreshMessage(
                 training.id,
             );
 
-            await this.publisher.refreshMessage(id);
-            await this.showActive(ctx);
-
+            await this.show(ctx, training.id);
             return;
         }
 
         if (
             callback.startsWith(
-                AdminCallbacks.TrainingCancelPrefix,
+                AdminCallbacks.TrainingOpenPrefix,
             )
         ) {
-            const id = this.getId(
-                callback,
-                AdminCallbacks.TrainingCancelPrefix,
-            );
-
             const training =
-                await this.services.trainings.getRequired(id);
-
-            await ctx.editMessageText(
-                [
-                    '❌ Скасувати тренування?',
-                    '',
-                    `🏸 ${training.title}`,
-                    `📅 ${training.date}`,
-                ].join('\n'),
-                createTrainingCancelKeyboard(id),
-            );
-
-            return;
-        }
-
-        if (
-            callback.startsWith(
-                AdminCallbacks.TrainingRefreshPrefix,
-            )
-        ) {
-            const id = this.getId(
-                callback,
-                AdminCallbacks.TrainingRefreshPrefix,
-            );
-
-            await this.publisher.refreshMessage(id);
-            await this.showTraining(ctx, id);
-
-            return;
-        }
-
-        if (
-            callback.startsWith(
-                AdminCallbacks.TrainingClosePrefix,
-            )
-        ) {
-            const id = this.getId(
-                callback,
-                AdminCallbacks.TrainingClosePrefix,
-            );
-
-            await this.services.trainings.close(id);
-            await this.publisher.refreshMessage(id);
-            await this.showTraining(ctx, id);
-
-            return;
-        }
-
-        if (
-            callback.startsWith(
-                AdminCallbacks.TrainingOpenPrefix,
-            )
-        ) {
-            const id = this.getId(
-                callback,
-                AdminCallbacks.TrainingOpenPrefix,
-            );
-
-            await this.services.trainings.open(id);
-            await this.publisher.refreshMessage(id);
-            await this.showTraining(ctx, id);
-
-            return;
-        }
-
-        if (
-            callback.startsWith(
-                AdminCallbacks.TrainingSelectAddPlayerPrefix,
-            )
-        ) {
-            const value = this.getId(
-                callback,
-                AdminCallbacks.TrainingSelectAddPlayerPrefix,
-            );
-
-            const [trainingId, playerId] =
-                value.split(':');
-
-            const player =
-                await this.services.repositories.players.findById(
-                    playerId,
+                await this.services.trainings.open(
+                    callback.replace(
+                        AdminCallbacks.TrainingOpenPrefix,
+                        '',
+                    ),
                 );
 
-            if (!player) {
-                throw new Error(
-                    `Player ${playerId} not found`,
-                );
-            }
-
-            await this.services.trainingParticipants.addOrUpdateParticipant({
-                trainingId,
-                playerId,
-                telegramUserId:
-                player.telegramUserId,
-                places: 1,
-                source: 'admin',
-            });
-
             await this.publisher.refreshMessage(
-                trainingId,
+                training.id,
             );
 
-            await this.showTraining(
-                ctx,
-                trainingId,
-            );
-
+            await this.show(ctx, training.id);
             return;
         }
 
-        if (
-            callback.startsWith(
-                AdminCallbacks.TrainingSelectRemovePlayerPrefix,
-            )
-        ) {
-            const value = this.getId(
-                callback,
-                AdminCallbacks.TrainingSelectRemovePlayerPrefix,
-            );
-
-            const [trainingId, playerId] =
-                value.split(':');
-
-            await this.services.trainingParticipants.removeParticipantCompletely({
-                trainingId,
-                playerId,
-            });
-
-            await this.publisher.refreshMessage(
-                trainingId,
-            );
-
-            await this.showTraining(
-                ctx,
-                trainingId,
-            );
-
-            return;
-        }
-
-        if (
-            callback.startsWith(
-                AdminCallbacks.TrainingAddPlayerPrefix,
-            )
-        ) {
-            const id = this.getId(
-                callback,
-                AdminCallbacks.TrainingAddPlayerPrefix,
-            );
-
-            this.services.adminFlow.transition(
-                ctx.from.id,
-                'waiting_training_add_player',
-                {
-                    trainingId: id,
-                },
-            );
-
-            await ctx.editMessageText(
-                '➕ Додати гравця\n\nВведіть імʼя або частину імені',
-            );
-
-            return;
-        }
-
-        if (
-            callback.startsWith(
-                AdminCallbacks.TrainingRemovePlayerPrefix,
-            )
-        ) {
-            const id = this.getId(
-                callback,
-                AdminCallbacks.TrainingRemovePlayerPrefix,
-            );
-
-            this.services.adminFlow.transition(
-                ctx.from.id,
-                'waiting_training_remove_player',
-                {
-                    trainingId: id,
-                },
-            );
-
-            await ctx.editMessageText(
-                '➖ Прибрати гравця\n\nВведіть імʼя або частину імені',
-            );
-
-            return;
-        }
-
-        const id = this.getId(
-            callback,
-            AdminCallbacks.TrainingPrefix,
+        await this.show(
+            ctx,
+            callback.replace(
+                AdminCallbacks.TrainingPrefix,
+                '',
+            ),
         );
-
-        await this.showTraining(ctx, id);
     }
 
-    private async showActive(
+    private async showList(
         ctx: Context,
     ): Promise<void> {
         const trainings =
             await this.services.repositories.trainings.listActive();
 
         trainings.sort(
-            (a, b) =>
-                this.getTimestamp(a) -
-                this.getTimestamp(b),
+            (first, second) =>
+                this.timestamp(first) -
+                this.timestamp(second),
         );
 
-        await ctx.editMessageText(
+        await this.services.adminUi.show(
+            ctx,
             [
                 '🏸 Активні тренування',
                 '',
-                trainings.length
-                    ? `Тренувань: ${trainings.length}`
+                trainings.length > 0
+                    ? `Знайдено: ${trainings.length}`
                     : 'Активних тренувань немає',
+                '',
+                trainings.length > 0
+                    ? 'Оберіть тренування'
+                    : 'Нові тренування зʼявляться тут після публікації',
             ].join('\n'),
-            createActiveTrainingsKeyboard(trainings),
+            createActiveTrainingsKeyboard(
+                trainings,
+            ),
         );
     }
 
-    private async showTraining(
+    private async show(
         ctx: Context,
         trainingId: string,
     ): Promise<void> {
@@ -306,46 +180,63 @@ export class AdminTrainingHandler {
                 trainingId,
             );
 
-        await ctx.editMessageText(
-            this.renderTraining(training),
+        await this.services.adminUi.show(
+            ctx,
+            renderTrainingCard(training),
             createTrainingKeyboard(training),
         );
     }
 
-    private renderTraining(
-        training: Training,
-    ): string {
-        const places =
-            training.participants.reduce(
-                (sum, item) =>
-                    sum + item.places,
-                0,
+    private async confirmCancel(
+        ctx: Context,
+        trainingId: string,
+    ): Promise<void> {
+        const training =
+            await this.services.trainings.getRequired(
+                trainingId,
             );
 
-        return [
-            `🏸 ${training.title}`,
-            '',
-            `📅 ${training.date}`,
-            `🕐 ${training.startTime}–${training.endTime}`,
-            '',
-            `👥 ${places}/${training.placesLimit}`,
-            `🕒 Очікування: ${training.waitlist.length}`,
-            `🔻 Мінімум: ${training.minPlayers}`,
-        ].join('\n');
+        await this.services.adminUi.show(
+            ctx,
+            [
+                '❌ Скасувати тренування?',
+                '',
+                `🏸 ${training.title}`,
+                `📅 ${formatDate(training.date)}`,
+                `🕐 ${formatTimeRange(
+                    training.startTime,
+                    training.endTime,
+                )}`,
+                '',
+                'Учасники побачать оновлений статус в оголошенні',
+            ].join('\n'),
+            createTrainingCancelKeyboard(
+                training.id,
+            ),
+        );
     }
 
-    private getId(
-        callback: string,
-        prefix: string,
-    ): string {
-        return callback.replace(prefix, '');
+    private async cancel(
+        ctx: Context,
+        trainingId: string,
+    ): Promise<void> {
+        const training =
+            await this.services.trainings.cancel(
+                trainingId,
+            );
+
+        await this.publisher.refreshMessage(
+            training.id,
+        );
+
+        await this.showList(ctx);
     }
 
-    private getTimestamp(
+    private timestamp(
         training: Training,
     ): number {
         return new Date(
-            `${training.date}T${training.startTime}:00`,
+            `${training.date}T${training.startTime}`,
         ).getTime();
     }
 }

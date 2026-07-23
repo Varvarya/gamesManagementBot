@@ -2,6 +2,7 @@ import { Context } from 'telegraf';
 import { ServicesContext } from '../../../app/services.context';
 import { TrainingCancellationScheduler } from '../../../scheduler/training-cancellation.scheduler';
 import { AdminCallbacks } from '../callbacks/admin-callbacks';
+import { createFlowCancelKeyboard } from '../keyboards/flow.keyboard';
 import { createSettingsKeyboard } from '../keyboards/settings.keyboard';
 
 export class AdminSettingsHandler {
@@ -39,18 +40,20 @@ export class AdminSettingsHandler {
                 'waiting_cancel_check_hours',
             );
 
-            await ctx.editMessageText(
+            await this.services.adminUi.show(
+                ctx,
                 [
-                    '⏰ Перевірка мінімуму гравців',
+                    '⏰ Перевірка мінімуму',
                     '',
-                    'Введіть, за скільки годин до тренування перевіряти кількість записаних',
+                    'Надішліть кількість годин до початку тренування',
                     '',
                     'Наприклад: 4',
-                    '',
-                    'Введіть 0, щоб перевіряти в момент початку тренування',
+                    'Доступний діапазон: 0–168',
                 ].join('\n'),
+                createFlowCancelKeyboard(
+                    AdminCallbacks.Settings,
+                ),
             );
-
             return;
         }
 
@@ -69,25 +72,42 @@ export class AdminSettingsHandler {
         const settings =
             await this.services.repositories.settings.get();
 
-        await ctx.editMessageText(
+        await this.services.adminUi.show(
+            ctx,
             [
-                '⚙️ Налаштування',
+                '⚙️ Налаштування клубу',
                 '',
-                `🏸 Клуб: ${settings.title}`,
-                `🌍 Часовий пояс: ${settings.timezone}`,
-                `💬 Chat ID: ${settings.chatId ?? 'не вказано'}`,
+                `🏸 ${settings.title}`,
+                `🌍 ${settings.timezone}`,
                 '',
                 `⏰ Перевірка мінімуму: за ${settings.cancelCheckHoursBefore} год`,
-                `🧹 Видаляти +1/-1: ${
+                `🧹 Видаляти повідомлення +1/-1: ${
                     settings.cleanChatMode
-                        ? 'так'
-                        : 'ні'
+                        ? 'увімкнено'
+                        : 'вимкнено'
                 }`,
             ].join('\n'),
             createSettingsKeyboard(
                 settings.cleanChatMode,
             ),
         );
+    }
+
+    async updateCancelCheckHours(
+        hours: number,
+    ): Promise<void> {
+        const settings =
+            await this.services.repositories.settings.get();
+
+        settings.cancelCheckHoursBefore = hours;
+        settings.updatedAt =
+            new Date().toISOString();
+
+        await this.services.repositories.settings.save(
+            settings,
+        );
+
+        await this.cancellationScheduler.restore();
     }
 
     private async toggleCleanChat(
@@ -107,24 +127,5 @@ export class AdminSettingsHandler {
         );
 
         await this.show(ctx);
-    }
-
-    async updateCancelCheckHours(
-        hours: number,
-    ): Promise<void> {
-        const settings =
-            await this.services.repositories.settings.get();
-
-        settings.cancelCheckHoursBefore =
-            hours;
-
-        settings.updatedAt =
-            new Date().toISOString();
-
-        await this.services.repositories.settings.save(
-            settings,
-        );
-
-        await this.cancellationScheduler.restore();
     }
 }

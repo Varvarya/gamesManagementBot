@@ -2,7 +2,12 @@ import { Context } from 'telegraf';
 import { ServicesContext } from '../../../app/services.context';
 import { TrainingPublisherService } from '../../../domain/trainings/training-publisher.service';
 import { AdminCallbacks } from '../callbacks/admin-callbacks';
-import { createTrainingPlayerSearchKeyboard } from '../keyboards/training.keyboard';
+import { createFlowCancelKeyboard } from '../keyboards/flow.keyboard';
+import {
+    createTrainingKeyboard,
+    createTrainingPlayerSearchKeyboard,
+} from '../keyboards/training.keyboard';
+import { renderTrainingCard } from '../ui/admin-formatters';
 
 type TrainingPlayerAction =
     | 'add'
@@ -14,7 +19,9 @@ export class TrainingFlowHandler {
         private readonly publisher: TrainingPublisherService,
     ) {}
 
-    canHandleCallback(callback: string): boolean {
+    canHandleCallback(
+        callback: string,
+    ): boolean {
         return (
             callback.startsWith(
                 AdminCallbacks.TrainingAddPlayerPrefix,
@@ -52,7 +59,6 @@ export class TrainingFlowHandler {
                 callback,
                 'add',
             );
-
             return;
         }
 
@@ -67,44 +73,52 @@ export class TrainingFlowHandler {
                 callback,
                 'remove',
             );
-
             return;
         }
 
-        if (
+        const action: TrainingPlayerAction =
             callback.startsWith(
                 AdminCallbacks.TrainingAddPlayerPrefix,
             )
-        ) {
-            const trainingId = callback.replace(
-                AdminCallbacks.TrainingAddPlayerPrefix,
-                '',
-            );
+                ? 'add'
+                : 'remove';
 
-            await this.startPlayerSearch(
-                ctx,
-                adminId,
+        const prefix =
+            action === 'add'
+                ? AdminCallbacks.TrainingAddPlayerPrefix
+                : AdminCallbacks.TrainingRemovePlayerPrefix;
+
+        const trainingId =
+            callback.replace(prefix, '');
+
+        this.services.adminFlow.transition(
+            adminId,
+            action === 'add'
+                ? 'waiting_training_add_player'
+                : 'waiting_training_remove_player',
+            {
                 trainingId,
-                'add',
-            );
-
-            return;
-        }
-
-        const trainingId = callback.replace(
-            AdminCallbacks.TrainingRemovePlayerPrefix,
-            '',
+            },
         );
 
-        await this.startPlayerSearch(
+        await this.services.adminUi.show(
             ctx,
-            adminId,
-            trainingId,
-            'remove',
+            [
+                action === 'add'
+                    ? '➕ Додати гравця'
+                    : '➖ Прибрати гравця',
+                '',
+                'Надішліть імʼя або його частину',
+            ].join('\n'),
+            createFlowCancelKeyboard(
+                `${AdminCallbacks.TrainingPrefix}${trainingId}`,
+            ),
         );
     }
 
-    canHandleText(adminId: number): boolean {
+    canHandleText(
+        adminId: number,
+    ): boolean {
         const state =
             this.services.adminFlow.getState(
                 adminId,
@@ -128,62 +142,6 @@ export class TrainingFlowHandler {
             return;
         }
 
-        const state =
-            this.services.adminFlow.getState(
-                adminId,
-            );
-
-        const action: TrainingPlayerAction =
-            state ===
-            'waiting_training_add_player'
-                ? 'add'
-                : 'remove';
-
-        await this.searchPlayers(
-            ctx,
-            adminId,
-            text,
-            action,
-        );
-    }
-
-    private async startPlayerSearch(
-        ctx: Context,
-        adminId: number,
-        trainingId: string,
-        action: TrainingPlayerAction,
-    ): Promise<void> {
-        await this.services.trainings.getRequired(
-            trainingId,
-        );
-
-        this.services.adminFlow.transition(
-            adminId,
-            action === 'add'
-                ? 'waiting_training_add_player'
-                : 'waiting_training_remove_player',
-            {
-                trainingId,
-            },
-        );
-
-        await ctx.editMessageText(
-            [
-                action === 'add'
-                    ? '➕ Додати гравця'
-                    : '➖ Прибрати гравця',
-                '',
-                'Введіть імʼя або частину імені',
-            ].join('\n'),
-        );
-    }
-
-    private async searchPlayers(
-        ctx: Context,
-        adminId: number,
-        query: string,
-        action: TrainingPlayerAction,
-    ): Promise<void> {
         const data =
             this.services.adminFlow.getData(
                 adminId,
@@ -195,9 +153,17 @@ export class TrainingFlowHandler {
             );
         }
 
+        const action: TrainingPlayerAction =
+            this.services.adminFlow.getState(
+                adminId,
+            ) ===
+            'waiting_training_add_player'
+                ? 'add'
+                : 'remove';
+
         let players =
             await this.services.repositories.players.searchByName(
-                query,
+                text,
             );
 
         if (action === 'add') {
@@ -212,12 +178,10 @@ export class TrainingFlowHandler {
 
             const playerIds = new Set([
                 ...training.participants.map(
-                    (participant) =>
-                        participant.playerId,
+                    (item) => item.playerId,
                 ),
                 ...training.waitlist.map(
-                    (participant) =>
-                        participant.playerId,
+                    (item) => item.playerId,
                 ),
             ]);
 
@@ -228,37 +192,55 @@ export class TrainingFlowHandler {
         }
 
         if (players.length === 0) {
-            await ctx.reply(
-                '❌ Гравців не знайдено',
+            await this.services.adminUi.replaceWithError(
+                ctx,
+                'Гравців за таким запитом не знайдено',
+                createFlowCancelKeyboard(
+                    `${AdminCallbacks.TrainingPrefix}${data.trainingId}`,
+                ),
             );
-
             return;
         }
 
         if (players.length === 1) {
             const player = players[0];
 
-            await this.applyPlayerAction(
+            await this.apply(
                 data.trainingId,
                 player.id,
                 action,
             );
 
+            const training =
+                await this.services.trainings.getRequired(
+                    data.trainingId,
+                );
+
             this.services.adminFlow.reset(
                 adminId,
             );
 
-            await ctx.reply(
-                action === 'add'
-                    ? `✅ ${player.displayName} додано`
-                    : `✅ ${player.displayName} прибрано`,
+            await this.services.adminUi.replaceWithSuccess(
+                ctx,
+                [
+                    action === 'add'
+                        ? `${player.displayName} додано`
+                        : `${player.displayName} прибрано`,
+                    '',
+                    renderTrainingCard(training),
+                ].join('\n'),
+                createTrainingKeyboard(training),
             );
-
             return;
         }
 
-        await ctx.reply(
-            'Оберіть гравця',
+        await this.services.adminUi.show(
+            ctx,
+            [
+                '🔎 Знайдено кілька гравців',
+                '',
+                'Оберіть потрібного',
+            ].join('\n'),
             createTrainingPlayerSearchKeyboard(
                 data.trainingId,
                 players.slice(0, 20),
@@ -278,13 +260,10 @@ export class TrainingFlowHandler {
                 ? AdminCallbacks.TrainingSelectAddPlayerPrefix
                 : AdminCallbacks.TrainingSelectRemovePlayerPrefix;
 
-        const value = callback.replace(
-            prefix,
-            '',
-        );
-
         const [trainingId, playerId] =
-            value.split(':');
+            callback
+                .replace(prefix, '')
+                .split(':');
 
         if (!trainingId || !playerId) {
             throw new Error(
@@ -292,22 +271,29 @@ export class TrainingFlowHandler {
             );
         }
 
-        await this.applyPlayerAction(
+        await this.apply(
             trainingId,
             playerId,
             action,
         );
 
+        const training =
+            await this.services.trainings.getRequired(
+                trainingId,
+            );
+
         this.services.adminFlow.reset(
             adminId,
         );
 
-        await ctx.editMessageText(
-            '✅ Готово',
+        await this.services.adminUi.replaceWithSuccess(
+            ctx,
+            renderTrainingCard(training),
+            createTrainingKeyboard(training),
         );
     }
 
-    private async applyPlayerAction(
+    private async apply(
         trainingId: string,
         playerId: string,
         action: TrainingPlayerAction,

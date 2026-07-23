@@ -1,75 +1,96 @@
-import schedule, { Job, RecurrenceRule } from 'node-schedule';
-import { TrainingService } from '../domain/trainings/training.service';
-import { TrainingTemplate } from '../domain/templates/template.types';
+import schedule, {
+    Job,
+    RecurrenceRule,
+} from 'node-schedule';
 
-type SchedulerPublishHandler = (template: TrainingTemplate) => Promise<void>;
+export type SchedulerTemplate = {
+    id: string;
+    dayOfWeek: number;
+    publishTime: string;
+};
+
+type SchedulerPublishHandler =
+    () => Promise<void>;
 
 export class SchedulerService {
-    private readonly jobs = new Map<string, Job>();
-
-    constructor(
-        private readonly trainings: TrainingService,
-    ) {}
-
-    restoreTemplates(
-        templates: TrainingTemplate[],
-        onPublish: SchedulerPublishHandler,
-    ): void {
-        this.cancelAll();
-
-        for (const template of templates) {
-            if (template.enabled) {
-                this.scheduleTemplate(template, onPublish);
-            }
-        }
-    }
-
-    scheduleTemplate(
-        template: TrainingTemplate,
-        onPublish: SchedulerPublishHandler,
-    ): void {
-        this.cancelTemplate(template.id);
-
-        if (!template.enabled) {
-            return;
-        }
-
-        const rule = this.createRule(template);
-
-        const job = schedule.scheduleJob(rule, async () => {
-            try {
-                await onPublish(template);
-            } catch (error) {
-                console.error(
-                    `Failed to publish training from template ${template.id}`,
-                    error,
-                );
-            }
-        });
-
-        if (!job) {
-            throw new Error(`Failed to schedule template ${template.id}`);
-        }
-
-        this.jobs.set(template.id, job);
-    }
+    private readonly jobs =
+        new Map<string, Job>();
 
     rescheduleTemplate(
-        template: TrainingTemplate,
+        template: SchedulerTemplate,
         onPublish: SchedulerPublishHandler,
     ): void {
-        this.scheduleTemplate(template, onPublish);
+        this.cancelTemplate(
+            template.id,
+        );
+
+        const rule =
+            this.createRule(
+                template,
+            );
+
+        const job =
+            schedule.scheduleJob(
+                rule,
+                async () => {
+                    try {
+                        await onPublish();
+                    } catch (error) {
+                        console.error(
+                            `Scheduled job failed: ${template.id}`,
+                            error,
+                        );
+                    }
+                },
+            );
+
+        if (!job) {
+            throw new Error(
+                `Failed to schedule job: ${template.id}`,
+            );
+        }
+
+        this.jobs.set(
+            template.id,
+            job,
+        );
     }
 
-    cancelTemplate(templateId: string): void {
-        const job = this.jobs.get(templateId);
+    cancelTemplate(
+        templateId: string,
+    ): void {
+        const job =
+            this.jobs.get(
+                templateId,
+            );
 
         if (!job) {
             return;
         }
 
         job.cancel();
-        this.jobs.delete(templateId);
+
+        this.jobs.delete(
+            templateId,
+        );
+    }
+
+    cancelByPrefix(
+        prefix: string,
+    ): void {
+        const matchingIds =
+            [...this.jobs.keys()].filter(
+                (jobId) =>
+                    jobId.startsWith(
+                        prefix,
+                    ),
+            );
+
+        for (const jobId of matchingIds) {
+            this.cancelTemplate(
+                jobId,
+            );
+        }
     }
 
     cancelAll(): void {
@@ -80,28 +101,38 @@ export class SchedulerService {
         this.jobs.clear();
     }
 
-    getScheduledTemplateIds(): string[] {
-        return [...this.jobs.keys()];
+    hasJob(
+        jobId: string,
+    ): boolean {
+        return this.jobs.has(
+            jobId,
+        );
     }
 
-    private createRule(template: TrainingTemplate): RecurrenceRule {
-        const [hours, minutes] = this.parseTime(template.publishTime);
+    getScheduledTemplateIds(): string[] {
+        return [
+            ...this.jobs.keys(),
+        ];
+    }
 
-        const rule = new schedule.RecurrenceRule();
+    private createRule(
+        template: SchedulerTemplate,
+    ): RecurrenceRule {
+        const [
+            hours,
+            minutes,
+        ] = this.parseTime(
+            template.publishTime,
+        );
 
-        /**
-         * node-schedule uses:
-         * 0 = Sunday
-         * 1 = Monday
-         * ...
-         * 6 = Saturday
-         *
-         * Our template uses:
-         * 1 = Monday
-         * ...
-         * 7 = Sunday
-         */
-        rule.dayOfWeek = this.toNodeScheduleDay(template.publishDayOfWeek);
+        const rule =
+            new schedule.RecurrenceRule();
+
+        rule.dayOfWeek =
+            this.toNodeScheduleDay(
+                template.dayOfWeek,
+            );
+
         rule.hour = hours;
         rule.minute = minutes;
         rule.second = 0;
@@ -109,11 +140,19 @@ export class SchedulerService {
         return rule;
     }
 
-    private parseTime(time: string): [number, number] {
-        const [hoursRaw, minutesRaw] = time.split(':');
+    private parseTime(
+        time: string,
+    ): [number, number] {
+        const [
+            hoursRaw,
+            minutesRaw,
+        ] = time.split(':');
 
-        const hours = Number(hoursRaw);
-        const minutes = Number(minutesRaw);
+        const hours =
+            Number(hoursRaw);
+
+        const minutes =
+            Number(minutesRaw);
 
         if (
             !Number.isInteger(hours) ||
@@ -123,17 +162,31 @@ export class SchedulerService {
             minutes < 0 ||
             minutes > 59
         ) {
-            throw new Error(`Invalid time format: ${time}`);
+            throw new Error(
+                `Invalid time format: ${time}`,
+            );
         }
 
-        return [hours, minutes];
+        return [
+            hours,
+            minutes,
+        ];
     }
 
-    private toNodeScheduleDay(dayOfWeek: number): number {
-        if (dayOfWeek < 1 || dayOfWeek > 7) {
-            throw new Error(`Invalid dayOfWeek: ${dayOfWeek}`);
+    private toNodeScheduleDay(
+        dayOfWeek: number,
+    ): number {
+        if (
+            dayOfWeek < 1 ||
+            dayOfWeek > 7
+        ) {
+            throw new Error(
+                `Invalid dayOfWeek: ${dayOfWeek}`,
+            );
         }
 
-        return dayOfWeek === 7 ? 0 : dayOfWeek;
+        return dayOfWeek === 7
+            ? 0
+            : dayOfWeek;
     }
 }

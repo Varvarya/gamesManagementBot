@@ -47,4 +47,25 @@ export class TrainingsRepository extends BaseJsonRepository<Training> {
                 training.templateId === templateId && training.date === date,
         );
     }
+
+    async findByTemplateSlotAndDate(input: {
+        templateId: string;
+        templateSlotId: string;
+        date: string;
+    }): Promise<Training | undefined> {
+        const trainings =
+            await this.list();
+
+        return trainings.find(
+            (training) =>
+                training.templateId ===
+                input.templateId &&
+                training.templateSlotId ===
+                input.templateSlotId &&
+                training.date ===
+                input.date &&
+                training.status !==
+                'cancelled',
+        );
+    }
 }

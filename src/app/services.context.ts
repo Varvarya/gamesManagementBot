@@ -43,7 +43,7 @@ export class ServicesContext {
 
         this.trainingMessageRenderer = new TrainingMessageRenderer();
 
-        this.scheduler = new SchedulerService(this.trainings);
+        this.scheduler = new SchedulerService();
 
         this.adminUi = new AdminUi();
     }

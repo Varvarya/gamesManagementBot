@@ -18,7 +18,9 @@ export class AdminFlowService {
             return existing;
         }
 
-        return this.reset(telegramUserId);
+        return this.createIdleSession(
+            telegramUserId,
+        );
     }
 
     getState(
@@ -39,24 +41,50 @@ export class AdminFlowService {
         };
     }
 
+    start(
+        telegramUserId: number,
+        state: AdminFlowState,
+        data: Partial<AdminFlowData> = {},
+    ): AdminSession {
+        const session: AdminSession = {
+            telegramUserId,
+            state,
+            data: {
+                ...data,
+            },
+        };
+
+        this.sessions.set(
+            telegramUserId,
+            session,
+        );
+
+        return session;
+    }
+
     transition(
         telegramUserId: number,
         state: AdminFlowState,
-        data?: Partial<AdminFlowData>,
+        data: Partial<AdminFlowData> = {},
     ): AdminSession {
         const session =
             this.getSession(telegramUserId);
 
-        session.state = state;
-
-        if (data) {
-            session.data = {
+        const updated: AdminSession = {
+            telegramUserId,
+            state,
+            data: {
                 ...session.data,
                 ...data,
-            };
-        }
+            },
+        };
 
-        return session;
+        this.sessions.set(
+            telegramUserId,
+            updated,
+        );
+
+        return updated;
     }
 
     setData(
@@ -66,15 +94,56 @@ export class AdminFlowService {
         const session =
             this.getSession(telegramUserId);
 
-        session.data = {
-            ...session.data,
-            ...data,
+        const updated: AdminSession = {
+            ...session,
+            data: {
+                ...session.data,
+                ...data,
+            },
         };
 
-        return session;
+        this.sessions.set(
+            telegramUserId,
+            updated,
+        );
+
+        return updated;
+    }
+
+    clearData(
+        telegramUserId: number,
+    ): AdminSession {
+        const session =
+            this.getSession(telegramUserId);
+
+        const updated: AdminSession = {
+            ...session,
+            data: {},
+        };
+
+        this.sessions.set(
+            telegramUserId,
+            updated,
+        );
+
+        return updated;
+    }
+
+    finish(
+        telegramUserId: number,
+    ): AdminSession {
+        return this.reset(telegramUserId);
     }
 
     reset(
+        telegramUserId: number,
+    ): AdminSession {
+        return this.createIdleSession(
+            telegramUserId,
+        );
+    }
+
+    private createIdleSession(
         telegramUserId: number,
     ): AdminSession {
         const session: AdminSession = {

@@ -36,6 +36,7 @@ export type Training = {
     id: TrainingId;
     clubId: string;
     templateId?: string;
+    templateSlotId?: string;
 
     chatId: number;
     messageId?: number;

@@ -2,6 +2,9 @@ import { Context } from 'telegraf';
 import { ServicesContext } from '../../../app/services.context';
 import { TrainingPublisherService } from '../../../domain/trainings/training-publisher.service';
 import { AdminCallbacks } from '../callbacks/admin-callbacks';
+import { createFlowCancelKeyboard } from '../keyboards/flow.keyboard';
+import { createPlayerKeyboard } from '../keyboards/player.keyboard';
+import { renderPlayerCard } from '../ui/admin-formatters';
 
 export class PlayerFlowHandler {
     constructor(
@@ -9,7 +12,9 @@ export class PlayerFlowHandler {
         private readonly publisher: TrainingPublisherService,
     ) {}
 
-    canHandleCallback(callback: string): boolean {
+    canHandleCallback(
+        callback: string,
+    ): boolean {
         return (
             callback === AdminCallbacks.CreatePlayer ||
             (
@@ -31,20 +36,26 @@ export class PlayerFlowHandler {
             return;
         }
 
-        if (callback === AdminCallbacks.CreatePlayer) {
+        if (
+            callback ===
+            AdminCallbacks.CreatePlayer
+        ) {
             this.services.adminFlow.transition(
                 adminId,
                 'waiting_new_player_name',
             );
 
-            await ctx.editMessageText(
+            await this.services.adminUi.show(
+                ctx,
                 [
                     '➕ Новий гравець',
                     '',
-                    'Введіть імʼя гравця',
+                    'Надішліть імʼя одним повідомленням',
                 ].join('\n'),
+                createFlowCancelKeyboard(
+                    AdminCallbacks.Players,
+                ),
             );
-
             return;
         }
 
@@ -74,18 +85,24 @@ export class PlayerFlowHandler {
             },
         );
 
-        await ctx.editMessageText(
+        await this.services.adminUi.show(
+            ctx,
             [
-                '✏️ Імʼя гравця',
+                '✏️ Зміна імені',
                 '',
                 `Зараз: ${player.displayName}`,
                 '',
-                'Введіть правильне імʼя',
+                'Надішліть правильне імʼя',
             ].join('\n'),
+            createFlowCancelKeyboard(
+                `${AdminCallbacks.PlayerPrefix}${player.id}`,
+            ),
         );
     }
 
-    canHandleText(adminId: number): boolean {
+    canHandleText(
+        adminId: number,
+    ): boolean {
         const state =
             this.services.adminFlow.getState(
                 adminId,
@@ -112,53 +129,27 @@ export class PlayerFlowHandler {
                 adminId,
             );
 
-        if (state === 'waiting_new_player_name') {
-            await this.createPlayer(
-                ctx,
+        if (
+            state ===
+            'waiting_new_player_name'
+        ) {
+            const player =
+                await this.services.players.createManual(
+                    text,
+                );
+
+            this.services.adminFlow.reset(
                 adminId,
-                text,
             );
 
+            await this.services.adminUi.replaceWithSuccess(
+                ctx,
+                renderPlayerCard(player),
+                createPlayerKeyboard(player),
+            );
             return;
         }
 
-        if (state === 'waiting_player_name') {
-            await this.renamePlayer(
-                ctx,
-                adminId,
-                text,
-            );
-        }
-    }
-
-    private async createPlayer(
-        ctx: Context,
-        adminId: number,
-        displayName: string,
-    ): Promise<void> {
-        const player =
-            await this.services.players.createManual(
-                displayName,
-            );
-
-        this.services.adminFlow.reset(
-            adminId,
-        );
-
-        await ctx.reply(
-            [
-                '✅ Гравця створено',
-                '',
-                `👤 ${player.displayName}`,
-            ].join('\n'),
-        );
-    }
-
-    private async renamePlayer(
-        ctx: Context,
-        adminId: number,
-        displayName: string,
-    ): Promise<void> {
         const data =
             this.services.adminFlow.getData(
                 adminId,
@@ -173,7 +164,7 @@ export class PlayerFlowHandler {
         const player =
             await this.services.players.updateName(
                 data.playerId,
-                displayName,
+                text,
             );
 
         await this.publisher.refreshMessagesForPlayer(
@@ -184,12 +175,10 @@ export class PlayerFlowHandler {
             adminId,
         );
 
-        await ctx.reply(
-            [
-                '✅ Гравця оновлено',
-                '',
-                `👤 ${player.displayName}`,
-            ].join('\n'),
+        await this.services.adminUi.replaceWithSuccess(
+            ctx,
+            renderPlayerCard(player),
+            createPlayerKeyboard(player),
         );
     }
 }

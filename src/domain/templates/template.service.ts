@@ -1,44 +1,48 @@
 import { RepositoriesContext } from '../../app/repositories.context';
-import { createId } from '../../utils/ids';
 import { nowIso } from '../../utils/date';
-import { TrainingTemplate } from './template.types';
+import { createId } from '../../utils/ids';
+import {
+    CreateTrainingTemplateSlotInput,
+    TrainingTemplate,
+    TrainingTemplateSlot,
+} from './template.types';
 
-type CreateTemplateInput = {
+export type CreateTemplateInput = {
     clubId: string;
     chatId: number;
 
     title: string;
     location?: string;
 
-    dayOfWeek: number;
-    startTime: string;
-    endTime: string;
-
     placesLimit: number;
     minPlayers: number;
 
-    publishDayOfWeek: number;
+    publishDaysBefore: number;
     publishTime: string;
+
+    slots: CreateTrainingTemplateSlotInput[];
+
+    enabled: boolean;
+};
+
+export type UpdateTemplateInput = {
+    title?: string;
+    location?: string;
+    chatId?: number;
+
+    placesLimit?: number;
+    minPlayers?: number;
+
+    publishDaysBefore?: number;
+    publishTime?: string;
+
+    slots?: Array<
+        TrainingTemplateSlot |
+        CreateTrainingTemplateSlotInput
+    >;
 
     enabled?: boolean;
 };
-
-type UpdateTemplateInput = Partial<
-    Pick<
-        TrainingTemplate,
-        | 'title'
-        | 'location'
-        | 'chatId'
-        | 'dayOfWeek'
-        | 'startTime'
-        | 'endTime'
-        | 'placesLimit'
-        | 'minPlayers'
-        | 'publishDayOfWeek'
-        | 'publishTime'
-        | 'enabled'
-    >
->;
 
 export class TemplateService {
     constructor(
@@ -48,24 +52,21 @@ export class TemplateService {
     async create(
         input: CreateTemplateInput,
     ): Promise<TrainingTemplate> {
-        this.validateDayOfWeek(input.dayOfWeek);
-        this.validateDayOfWeek(input.publishDayOfWeek);
-        this.validateTime(input.startTime);
-        this.validateTime(input.endTime);
-        this.validateTime(input.publishTime);
+        this.validateCommonFields({
+            placesLimit: input.placesLimit,
+            minPlayers: input.minPlayers,
+            publishDaysBefore:
+            input.publishDaysBefore,
+            publishTime: input.publishTime,
+        });
 
-
-        if (input.placesLimit < 1) {
-            throw new Error('placesLimit must be greater than 0');
-        }
-
-        if (input.minPlayers < 0) {
-            throw new Error('minPlayers can not be negative');
-        }
-
-        if (input.minPlayers > input.placesLimit) {
-            throw new Error('minPlayers can not exceed placesLimit');
-        }
+        this.validateSlots(
+            input.slots,
+            input.placesLimit,
+            input.minPlayers,
+            input.publishDaysBefore,
+            input.publishTime,
+        );
 
         const now = nowIso();
 
@@ -73,131 +74,323 @@ export class TemplateService {
             id: createId('template'),
             clubId: input.clubId,
             chatId: input.chatId,
+
             title: input.title.trim(),
-            location: input.location?.trim() || undefined,
-            dayOfWeek: input.dayOfWeek,
-            startTime: input.startTime,
-            endTime: input.endTime,
+            location:
+                input.location?.trim() ||
+                undefined,
+
             placesLimit: input.placesLimit,
             minPlayers: input.minPlayers,
-            publishDayOfWeek: input.publishDayOfWeek,
+
+            publishDaysBefore:
+            input.publishDaysBefore,
             publishTime: input.publishTime,
-            enabled: input.enabled ?? true,
+
+            slots: input.slots.map(
+                slot => ({
+                    ...slot,
+                    id: createId('slot'),
+                    enabled:
+                        slot.enabled ?? true,
+                }),
+            ),
+
+            enabled:
+                input.enabled ?? true,
+
             createdAt: now,
             updatedAt: now,
         };
 
-        return this.repositories.templates.save(template);
+        return this.repositories.templates.save(
+            template,
+        );
     }
 
     async update(
         templateId: string,
         input: UpdateTemplateInput,
     ): Promise<TrainingTemplate> {
-        const template = await this.getRequired(templateId);
+        const template =
+            await this.getRequired(
+                templateId,
+            );
 
-        if (input.dayOfWeek !== undefined) {
-            this.validateDayOfWeek(input.dayOfWeek);
-        }
+        const placesLimit =
+            input.placesLimit ??
+            template.placesLimit;
 
-        if (input.publishDayOfWeek !== undefined) {
-            this.validateDayOfWeek(input.publishDayOfWeek);
-        }
+        const minPlayers =
+            input.minPlayers ??
+            template.minPlayers;
 
-        if (input.startTime !== undefined) {
-            this.validateTime(input.startTime);
-        }
+        const publishDaysBefore =
+            input.publishDaysBefore ??
+            template.publishDaysBefore;
 
-        if (input.publishTime !== undefined) {
-            this.validateTime(input.publishTime);
-        }
+        const publishTime =
+            input.publishTime ??
+            template.publishTime;
 
-        if (input.endTime !== undefined) {
-            this.validateTime(input.endTime);
-        }
+        const slots =
+            input.slots ??
+            template.slots;
 
-        if (
-            input.placesLimit !== undefined &&
-            input.placesLimit < 1
-        ) {
-            throw new Error('placesLimit must be greater than 0');
-        }
+        this.validateCommonFields({
+            placesLimit,
+            minPlayers,
+            publishDaysBefore,
+            publishTime,
+        });
 
-        if (
-            input.minPlayers !== undefined &&
-            input.minPlayers < 0
-        ) {
-            throw new Error('minPlayers can not be negative');
-        }
+        this.validateSlots(
+            slots,
+            placesLimit,
+            minPlayers,
+            publishDaysBefore,
+            publishTime,
+        );
 
-        Object.assign(template, input);
+        Object.assign(
+            template,
+            input,
+        );
 
-        if (template.minPlayers > template.placesLimit) {
-            throw new Error('minPlayers can not exceed placesLimit');
-        }
+        template.title =
+            template.title.trim();
 
-        template.title = template.title.trim();
         template.location =
-            template.location?.trim() || undefined;
-        template.updatedAt = nowIso();
+            template.location?.trim() ||
+            undefined;
 
-        return this.repositories.templates.save(template);
+        template.slots = slots.map(
+            slot => ({
+                ...slot,
+
+                id:
+                    'id' in slot &&
+                    slot.id
+                        ? slot.id
+                        : createId('slot'),
+
+                enabled:
+                    slot.enabled ?? true,
+            }),
+        );
+
+        template.updatedAt =
+            nowIso();
+
+        return this.repositories.templates.save(
+            template,
+        );
     }
 
-    async enable(templateId: string): Promise<TrainingTemplate> {
-        return this.update(templateId, {
-            enabled: true,
-        });
+    async enable(
+        templateId: string,
+    ): Promise<TrainingTemplate> {
+        return this.update(
+            templateId,
+            {
+                enabled: true,
+            },
+        );
     }
 
-    async disable(templateId: string): Promise<TrainingTemplate> {
-        return this.update(templateId, {
-            enabled: false,
-        });
+    async disable(
+        templateId: string,
+    ): Promise<TrainingTemplate> {
+        return this.update(
+            templateId,
+            {
+                enabled: false,
+            },
+        );
     }
 
     async listByClubId(
         clubId: string,
     ): Promise<TrainingTemplate[]> {
-        return this.repositories.templates.listByClubId(clubId);
+        return this.repositories.templates.listByClubId(
+            clubId,
+        );
     }
 
     async getRequired(
         templateId: string,
     ): Promise<TrainingTemplate> {
         const template =
-            await this.repositories.templates.findById(templateId);
+            await this.repositories.templates.findById(
+                templateId,
+            );
 
         if (!template) {
-            throw new Error(`Template ${templateId} not found`);
+            throw new Error(
+                `Template ${templateId} not found`,
+            );
         }
 
         return template;
     }
 
-    async delete(templateId: string): Promise<void> {
-        await this.repositories.templates.delete(templateId);
+    async delete(
+        templateId: string,
+    ): Promise<void> {
+        await this.repositories.templates.delete(
+            templateId,
+        );
     }
 
-    private validateDayOfWeek(dayOfWeek: number): void {
+    private validateCommonFields(
+        input: {
+            placesLimit: number;
+            minPlayers: number;
+            publishDaysBefore: number;
+            publishTime: string;
+        },
+    ): void {
+        if (input.placesLimit < 1) {
+            throw new Error(
+                'placesLimit must be greater than 0',
+            );
+        }
+
+        if (input.minPlayers < 0) {
+            throw new Error(
+                'minPlayers can not be negative',
+            );
+        }
+
+        if (
+            input.minPlayers >
+            input.placesLimit
+        ) {
+            throw new Error(
+                'minPlayers can not exceed placesLimit',
+            );
+        }
+
+        if (
+            !Number.isInteger(
+                input.publishDaysBefore,
+            ) ||
+            input.publishDaysBefore < 0
+        ) {
+            throw new Error(
+                'publishDaysBefore must be a non-negative integer',
+            );
+        }
+
+        this.validateTime(
+            input.publishTime,
+        );
+    }
+
+    private validateSlots(
+        slots: Array<
+            TrainingTemplateSlot |
+            CreateTrainingTemplateSlotInput
+        >,
+        defaultPlacesLimit: number,
+        defaultMinPlayers: number,
+        defaultPublishDaysBefore: number,
+        defaultPublishTime: string,
+    ): void {
+        if (slots.length === 0) {
+            throw new Error(
+                'Template must contain at least one slot',
+            );
+        }
+
+        for (const slot of slots) {
+            this.validateDayOfWeek(
+                slot.dayOfWeek,
+            );
+
+            this.validateTime(
+                slot.startTime,
+            );
+
+            this.validateTime(
+                slot.endTime,
+            );
+
+            if (
+                this.timeToMinutes(
+                    slot.endTime,
+                ) <=
+                this.timeToMinutes(
+                    slot.startTime,
+                )
+            ) {
+                throw new Error(
+                    'Slot endTime must be later than startTime',
+                );
+            }
+
+            const placesLimit =
+                slot.placesLimit ??
+                defaultPlacesLimit;
+
+            const minPlayers =
+                slot.minPlayers ??
+                defaultMinPlayers;
+
+            const publishDaysBefore =
+                slot.publishDaysBefore ??
+                defaultPublishDaysBefore;
+
+            const publishTime =
+                slot.publishTime ??
+                defaultPublishTime;
+
+            this.validateCommonFields({
+                placesLimit,
+                minPlayers,
+                publishDaysBefore,
+                publishTime,
+            });
+        }
+    }
+
+    private validateDayOfWeek(
+        dayOfWeek: number,
+    ): void {
         if (
             !Number.isInteger(dayOfWeek) ||
             dayOfWeek < 1 ||
             dayOfWeek > 7
         ) {
-            throw new Error('dayOfWeek must be from 1 to 7');
+            throw new Error(
+                'dayOfWeek must be from 1 to 7',
+            );
         }
     }
 
-    private validateTime(time: string): void {
-        if (!/^\d{2}:\d{2}$/.test(time)) {
-            throw new Error(`Invalid time format: ${time}`);
+    private validateTime(
+        time: string,
+    ): void {
+        if (
+            !/^\d{2}:\d{2}$/.test(
+                time,
+            )
+        ) {
+            throw new Error(
+                `Invalid time format: ${time}`,
+            );
         }
 
-        const [hoursRaw, minutesRaw] = time.split(':');
+        const [
+            hoursRaw,
+            minutesRaw,
+        ] = time.split(':');
 
-        const hours = Number(hoursRaw);
-        const minutes = Number(minutesRaw);
+        const hours =
+            Number(hoursRaw);
+
+        const minutes =
+            Number(minutesRaw);
 
         if (
             hours < 0 ||
@@ -205,7 +398,25 @@ export class TemplateService {
             minutes < 0 ||
             minutes > 59
         ) {
-            throw new Error(`Invalid time: ${time}`);
+            throw new Error(
+                `Invalid time: ${time}`,
+            );
         }
+    }
+
+    private timeToMinutes(
+        time: string,
+    ): number {
+        const [
+            hours,
+            minutes,
+        ] = time
+            .split(':')
+            .map(Number);
+
+        return (
+            hours * 60 +
+            minutes
+        );
     }
 }

@@ -36,9 +36,10 @@ export class SettingsFlowHandler {
             hours < 0 ||
             hours > 168
         ) {
-            await ctx.reply(
+            await this.services.adminUi.replaceWithError(
+                ctx,
                 [
-                    '❌ Некоректне значення',
+                    'Некоректне значення',
                     '',
                     'Введіть ціле число від 0 до 168',
                 ].join('\n'),
@@ -55,12 +56,6 @@ export class SettingsFlowHandler {
             adminId,
         );
 
-        await ctx.reply(
-            [
-                '✅ Налаштування оновлено',
-                '',
-                `Перевірка мінімуму відбуватиметься за ${hours} год до тренування`,
-            ].join('\n'),
-        );
+        await this.settingsHandler.show(ctx);
     }
 }

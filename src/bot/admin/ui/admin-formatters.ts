@@ -158,31 +158,56 @@ export function renderTrainingCard(
 export function renderTemplateCard(
     template: TrainingTemplate,
 ): string {
+    const slotLines = template.slots.flatMap(
+        (slot, index) => {
+            const placesLimit =
+                slot.placesLimit ??
+                template.placesLimit;
+
+            const minPlayers =
+                slot.minPlayers ??
+                template.minPlayers;
+
+            const publishDaysBefore =
+                slot.publishDaysBefore ??
+                template.publishDaysBefore;
+
+            const publishTime =
+                slot.publishTime ??
+                template.publishTime;
+
+            return [
+                index > 0
+                    ? ''
+                    : undefined,
+                `${
+                    slot.enabled
+                        ? '🟢'
+                        : '⚪️'
+                } ${formatDay(slot.dayOfWeek)}`,
+                `🕐 ${formatTimeRange(
+                    slot.startTime,
+                    slot.endTime,
+                )}`,
+                `👥 Місць: ${placesLimit}`,
+                `🔻 Мінімум: ${minPlayers}`,
+                `📣 За ${publishDaysBefore} дн. о ${publishTime}`,
+            ];
+        },
+    );
+
     return [
         `${
             template.enabled
                 ? '🟢'
                 : '⚪️'
         } ${template.title}`,
-        '',
-        '🏸 Тренування',
-        `📅 ${formatDay(template.dayOfWeek)}`,
-        `🕐 ${formatTimeRange(
-            template.startTime,
-            template.endTime,
-        )}`,
         template.location
             ? `📍 ${template.location}`
             : undefined,
         '',
-        `👥 Місць: ${template.placesLimit}`,
-        `🔻 Мінімум: ${template.minPlayers}`,
-        '',
-        '📣 Публікація',
-        `📅 ${formatDay(
-            template.publishDayOfWeek,
-        )}`,
-        `🕐 ${template.publishTime}`,
+        '🏸 Слоти тренувань',
+        ...slotLines,
     ]
         .filter(
             (line): line is string =>

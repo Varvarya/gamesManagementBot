@@ -1,3 +1,8 @@
+import {
+    CreateTrainingTemplateSlotInput,
+} from '../../../domain/templates/template.types';
+
+
 export type AdminFlowState =
     | 'idle'
     | 'waiting_template_quick_input'
@@ -11,17 +16,15 @@ export type AdminFlowState =
 
 export type PendingTemplate = {
     title: string;
-
-    dayOfWeek: number;
-
-    startTime: string;
-    endTime: string;
+    location?: string;
 
     placesLimit: number;
     minPlayers: number;
 
-    publishDayOfWeek: number;
+    publishDaysBefore: number;
     publishTime: string;
+
+    slots: CreateTrainingTemplateSlotInput[];
 };
 
 export type AdminFlowData = {

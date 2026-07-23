@@ -1,48 +1,69 @@
-import { Context } from 'telegraf';
+import {
+    Context,
+    Markup,
+} from 'telegraf';
+
 import { ServicesContext } from '../../../app/services.context';
 import { TemplateSchedulerService } from '../../../domain/templates/template-scheduler.service';
+import { TrainingTemplateSlot } from '../../../domain/templates/template.types';
+
 import { AdminCallbacks } from '../callbacks/admin-callbacks';
-import { createTemplatePreviewKeyboard } from '../keyboards/template.keyboard';
+
+import { createFlowCancelKeyboard } from '../keyboards/flow.keyboard';
+import {
+    createTemplateKeyboard,
+    createTemplatePreviewKeyboard,
+} from '../keyboards/template.keyboard';
+
+import {
+    formatDay,
+    renderTemplateCard,
+} from '../ui/admin-formatters';
+
 import { PendingTemplate } from './admin-flow.types';
 
 const DAY_ALIASES: Record<string, number> = {
     '1': 1,
-    'пн': 1,
-    'понеділок': 1,
-    'понедельник': 1,
+    пн: 1,
+    понеділок: 1,
+    понедельник: 1,
 
     '2': 2,
-    'вт': 2,
-    'вівторок': 2,
-    'вторник': 2,
+    вт: 2,
+    вівторок: 2,
+    вторник: 2,
 
     '3': 3,
-    'ср': 3,
-    'середа': 3,
-    'среда': 3,
+    ср: 3,
+    середа: 3,
+    среда: 3,
 
     '4': 4,
-    'чт': 4,
-    'четвер': 4,
-    'четверг': 4,
+    чт: 4,
+    четвер: 4,
+    четверг: 4,
 
     '5': 5,
-    'пт': 5,
+    пт: 5,
     "п'ятниця": 5,
-    'пятниця': 5,
-    'пятница': 5,
+    пятниця: 5,
+    пятница: 5,
 
     '6': 6,
-    'сб': 6,
-    'субота': 6,
-    'суббота': 6,
+    сб: 6,
+    субота: 6,
+    суббота: 6,
 
     '7': 7,
-    'нд': 7,
-    'неділя': 7,
-    'вс': 7,
-    'воскресенье': 7,
+    нд: 7,
+    неділя: 7,
+    вс: 7,
+    воскресенье: 7,
 };
+
+type TemplateFlowMode =
+    | 'create'
+    | 'edit';
 
 export class TemplateFlowHandler {
     constructor(
@@ -50,17 +71,15 @@ export class TemplateFlowHandler {
         private readonly templateScheduler: TemplateSchedulerService,
     ) {}
 
-    canHandleCallback(callback: string): boolean {
+    canHandleCallback(
+        callback: string,
+    ): boolean {
         return (
             callback === AdminCallbacks.CreateTemplate ||
-            callback ===
-            AdminCallbacks.ConfirmCreateTemplate ||
-            callback ===
-            AdminCallbacks.CancelCreateTemplate ||
-            callback ===
-            AdminCallbacks.ConfirmEditTemplate ||
-            callback ===
-            AdminCallbacks.CancelEditTemplate ||
+            callback === AdminCallbacks.ConfirmCreateTemplate ||
+            callback === AdminCallbacks.CancelCreateTemplate ||
+            callback === AdminCallbacks.ConfirmEditTemplate ||
+            callback === AdminCallbacks.CancelEditTemplate ||
             callback.startsWith(
                 AdminCallbacks.TemplateEditPrefix,
             )
@@ -77,8 +96,15 @@ export class TemplateFlowHandler {
             return;
         }
 
-        if (callback === AdminCallbacks.CreateTemplate) {
-            await this.startCreate(ctx, adminId);
+        if (
+            callback ===
+            AdminCallbacks.CreateTemplate
+        ) {
+            await this.startCreate(
+                ctx,
+                adminId,
+            );
+
             return;
         }
 
@@ -87,10 +113,11 @@ export class TemplateFlowHandler {
                 AdminCallbacks.TemplateEditPrefix,
             )
         ) {
-            const templateId = callback.replace(
-                AdminCallbacks.TemplateEditPrefix,
-                '',
-            );
+            const templateId =
+                callback.replace(
+                    AdminCallbacks.TemplateEditPrefix,
+                    '',
+                );
 
             await this.startEdit(
                 ctx,
@@ -105,7 +132,11 @@ export class TemplateFlowHandler {
             callback ===
             AdminCallbacks.ConfirmCreateTemplate
         ) {
-            await this.confirmCreate(ctx, adminId);
+            await this.confirmCreate(
+                ctx,
+                adminId,
+            );
+
             return;
         }
 
@@ -113,7 +144,11 @@ export class TemplateFlowHandler {
             callback ===
             AdminCallbacks.ConfirmEditTemplate
         ) {
-            await this.confirmEdit(ctx, adminId);
+            await this.confirmEdit(
+                ctx,
+                adminId,
+            );
+
             return;
         }
 
@@ -123,17 +158,20 @@ export class TemplateFlowHandler {
             callback ===
             AdminCallbacks.CancelEditTemplate
         ) {
-            this.services.adminFlow.reset(adminId);
-
-            await ctx.editMessageText(
-                '❌ Дію скасовано',
+            await this.cancel(
+                ctx,
+                adminId,
             );
         }
     }
 
-    canHandleText(adminId: number): boolean {
+    canHandleText(
+        adminId: number,
+    ): boolean {
         const state =
-            this.services.adminFlow.getState(adminId);
+            this.services.adminFlow.getState(
+                adminId,
+            );
 
         return (
             state ===
@@ -154,25 +192,26 @@ export class TemplateFlowHandler {
         }
 
         const state =
-            this.services.adminFlow.getState(adminId);
+            this.services.adminFlow.getState(
+                adminId,
+            );
+
+        const mode: TemplateFlowMode =
+            state ===
+            'waiting_template_edit_input'
+                ? 'edit'
+                : 'create';
 
         const pendingTemplate =
-            this.parseTemplateInput(text);
+            this.parseTemplateInput(
+                text,
+            );
 
         if (!pendingTemplate) {
-            await ctx.reply(
-                [
-                    '❌ Не вдалося розпізнати дані',
-                    '',
-                    'Приклад:',
-                    '',
-                    'Назва: Вечірнє тренування',
-                    'Ср',
-                    '19:30-21:30',
-                    '20',
-                    '8',
-                    'Вт 12:00',
-                ].join('\n'),
+            await this.showFormatError(
+                ctx,
+                adminId,
+                mode,
             );
 
             return;
@@ -185,15 +224,14 @@ export class TemplateFlowHandler {
             },
         );
 
-        const mode =
-            state ===
-            'waiting_template_edit_input'
-                ? 'edit'
-                : 'create';
-
-        await ctx.reply(
-            this.renderPreview(pendingTemplate),
-            createTemplatePreviewKeyboard(mode),
+        await this.services.adminUi.show(
+            ctx,
+            this.renderPreview(
+                pendingTemplate,
+            ),
+            createTemplatePreviewKeyboard(
+                mode,
+            ),
         );
     }
 
@@ -201,16 +239,17 @@ export class TemplateFlowHandler {
         ctx: Context,
         adminId: number,
     ): Promise<void> {
-        this.services.adminFlow.transition(
+        this.services.adminFlow.start(
             adminId,
             'waiting_template_quick_input',
         );
 
-        await ctx.editMessageText(
+        await this.services.adminUi.show(
+            ctx,
             [
                 '➕ Новий шаблон',
                 '',
-                'Надішліть дані одним повідомленням:',
+                'Надішліть дані одним повідомленням',
                 '',
                 'Назва: Вечірнє тренування',
                 'Ср',
@@ -219,8 +258,17 @@ export class TemplateFlowHandler {
                 '8',
                 'Вт 12:00',
                 '',
-                'Назва необовʼязкова',
+                'Формат:',
+                '1. Назва — необовʼязково',
+                '2. День тренування',
+                '3. Час початку та завершення',
+                '4. Кількість місць',
+                '5. Мінімум гравців',
+                '6. День і час публікації',
             ].join('\n'),
+            createFlowCancelKeyboard(
+                AdminCallbacks.Schedule,
+            ),
         );
     }
 
@@ -234,7 +282,38 @@ export class TemplateFlowHandler {
                 templateId,
             );
 
-        this.services.adminFlow.transition(
+        const slot =
+            this.getPrimarySlot(
+                template.slots,
+            );
+
+        if (!slot) {
+            await this.services.adminUi.replaceWithError(
+                ctx,
+                'У шаблоні немає слотів для редагування.',
+                createFlowCancelKeyboard(
+                    `${AdminCallbacks.TemplatePrefix}${template.id}`,
+                ),
+            );
+
+            return;
+        }
+
+        const publishDaysBefore =
+            slot.publishDaysBefore ??
+            template.publishDaysBefore;
+
+        const publishTime =
+            slot.publishTime ??
+            template.publishTime;
+
+        const publishDayOfWeek =
+            this.resolvePublishDayOfWeek(
+                slot.dayOfWeek,
+                publishDaysBefore,
+            );
+
+        this.services.adminFlow.start(
             adminId,
             'waiting_template_edit_input',
             {
@@ -242,19 +321,33 @@ export class TemplateFlowHandler {
             },
         );
 
-        await ctx.editMessageText(
+        await this.services.adminUi.show(
+            ctx,
             [
                 '✏️ Редагування шаблону',
                 '',
-                'Скопіюйте блок нижче, змініть потрібні дані та надішліть:',
+                'Скопіюйте блок нижче, змініть потрібні дані та надішліть його',
                 '',
                 `Назва: ${template.title}`,
-                this.getDayTitle(template.dayOfWeek),
-                `${template.startTime}-${template.endTime}`,
-                String(template.placesLimit),
-                String(template.minPlayers),
-                `${this.getDayTitle(template.publishDayOfWeek)} ${template.publishTime}`,
+                this.getShortDayTitle(
+                    slot.dayOfWeek,
+                ),
+                `${slot.startTime}-${slot.endTime}`,
+                String(
+                    slot.placesLimit ??
+                    template.placesLimit,
+                ),
+                String(
+                    slot.minPlayers ??
+                    template.minPlayers,
+                ),
+                `${this.getShortDayTitle(
+                    publishDayOfWeek,
+                )} ${publishTime}`,
             ].join('\n'),
+            createFlowCancelKeyboard(
+                `${AdminCallbacks.TemplatePrefix}${template.id}`,
+            ),
         );
     }
 
@@ -263,34 +356,62 @@ export class TemplateFlowHandler {
         adminId: number,
     ): Promise<void> {
         const data =
-            this.services.adminFlow.getData(adminId);
+            this.services.adminFlow.getData(
+                adminId,
+            );
 
         if (!data.pendingTemplate) {
-            throw new Error(
-                'Pending template not found',
+            this.services.adminFlow.finish(
+                adminId,
             );
+
+            await this.services.adminUi.replaceWithError(
+                ctx,
+                'Дані шаблону не знайдені. Почніть створення ще раз.',
+                this.createBackToScheduleKeyboard(),
+            );
+
+            return;
         }
 
         const settings =
             await this.services.repositories.settings.get();
 
         if (!settings.chatId) {
-            throw new Error(
-                'Club chatId is missing',
+            await this.services.adminUi.replaceWithError(
+                ctx,
+                'Спочатку потрібно налаштувати груповий чат клубу.',
+                this.createBackToScheduleKeyboard(),
             );
+
+            return;
         }
 
-        await this.templateScheduler.create({
-            clubId: settings.clubId,
-            chatId: settings.chatId,
-            ...data.pendingTemplate,
-            enabled: true,
-        });
+        const template =
+            await this.templateScheduler.create({
+                clubId:
+                settings.clubId,
 
-        this.services.adminFlow.reset(adminId);
+                chatId:
+                settings.chatId,
 
-        await ctx.editMessageText(
-            '✅ Шаблон створено',
+                ...data.pendingTemplate,
+
+                enabled: true,
+            });
+
+        this.services.adminFlow.finish(
+            adminId,
+        );
+
+        await this.services.adminUi.replaceWithSuccess(
+            ctx,
+            renderTemplateCard(
+                template,
+            ),
+            createTemplateKeyboard(
+                template,
+            ),
         );
     }
 
@@ -299,101 +420,230 @@ export class TemplateFlowHandler {
         adminId: number,
     ): Promise<void> {
         const data =
-            this.services.adminFlow.getData(adminId);
+            this.services.adminFlow.getData(
+                adminId,
+            );
 
         if (
             !data.templateId ||
             !data.pendingTemplate
         ) {
-            throw new Error(
-                'Template edit data is incomplete',
+            this.services.adminFlow.finish(
+                adminId,
             );
+
+            await this.services.adminUi.replaceWithError(
+                ctx,
+                'Дані для редагування не знайдені. Відкрийте шаблон і спробуйте ще раз.',
+                this.createBackToScheduleKeyboard(),
+            );
+
+            return;
         }
 
-        await this.templateScheduler.update(
-            data.templateId,
-            data.pendingTemplate,
+        const template =
+            await this.templateScheduler.update(
+                data.templateId,
+                data.pendingTemplate,
+            );
+
+        this.services.adminFlow.finish(
+            adminId,
         );
 
-        this.services.adminFlow.reset(adminId);
+        await this.services.adminUi.replaceWithSuccess(
+            ctx,
+            renderTemplateCard(
+                template,
+            ),
+            createTemplateKeyboard(
+                template,
+            ),
+        );
+    }
 
-        await ctx.editMessageText(
-            '✅ Шаблон оновлено',
+    private async cancel(
+        ctx: Context,
+        adminId: number,
+    ): Promise<void> {
+        this.services.adminFlow.finish(
+            adminId,
+        );
+
+        await this.services.adminUi.show(
+            ctx,
+            [
+                '❌ Дію скасовано',
+                '',
+                'Зміни не були збережені',
+            ].join('\n'),
+            this.createBackToScheduleKeyboard(),
+        );
+    }
+
+    private async showFormatError(
+        ctx: Context,
+        adminId: number,
+        mode: TemplateFlowMode,
+    ): Promise<void> {
+        const data =
+            this.services.adminFlow.getData(
+                adminId,
+            );
+
+        const backCallback =
+            mode === 'edit' &&
+            data.templateId
+                ? `${AdminCallbacks.TemplatePrefix}${data.templateId}`
+                : AdminCallbacks.Schedule;
+
+        await this.services.adminUi.replaceWithError(
+            ctx,
+            [
+                'Не вдалося розпізнати формат',
+                '',
+                'Надішліть дані так:',
+                '',
+                'Назва: Вечірнє тренування',
+                'Ср',
+                '19:30-21:30',
+                '20',
+                '8',
+                'Вт 12:00',
+            ].join('\n'),
+            createFlowCancelKeyboard(
+                backCallback,
+            ),
         );
     }
 
     private parseTemplateInput(
         value: string,
     ): PendingTemplate | undefined {
-        const lines = value
-            .split('\n')
-            .map((line) => line.trim())
-            .filter(Boolean);
+        const lines =
+            value
+                .split('\n')
+                .map(
+                    line =>
+                        line.trim(),
+                )
+                .filter(Boolean);
 
-        let title: string | undefined;
-        let dataLines = lines;
+        let title:
+            | string
+            | undefined;
 
-        if (/^назва\s*:/i.test(lines[0] ?? '')) {
-            title = lines[0]
-                .replace(/^назва\s*:/i, '')
-                .trim();
+        let dataLines =
+            lines;
+
+        if (
+            /^назва\s*:/i.test(
+                lines[0] ?? '',
+            )
+        ) {
+            title =
+                lines[0]
+                    .replace(
+                        /^назва\s*:/i,
+                        '',
+                    )
+                    .trim();
 
             if (!title) {
                 return undefined;
             }
 
-            dataLines = lines.slice(1);
+            dataLines =
+                lines.slice(1);
         }
 
-        if (dataLines.length !== 5) {
+        if (
+            dataLines.length !== 5
+        ) {
             return undefined;
         }
 
         const dayOfWeek =
-            this.parseDay(dataLines[0]);
+            this.parseDay(
+                dataLines[0],
+            );
 
         const timeRange =
-            this.parseTimeRange(dataLines[1]);
+            this.parseTimeRange(
+                dataLines[1],
+            );
 
         const placesLimit =
-            Number(dataLines[2]);
+            Number(
+                dataLines[2],
+            );
 
         const minPlayers =
-            Number(dataLines[3]);
+            Number(
+                dataLines[3],
+            );
 
         const publish =
-            this.parsePublishValue(dataLines[4]);
+            this.parsePublishValue(
+                dataLines[4],
+            );
 
         if (
             !dayOfWeek ||
             !timeRange ||
-            !Number.isInteger(placesLimit) ||
+            !Number.isInteger(
+                placesLimit,
+            ) ||
             placesLimit < 1 ||
-            !Number.isInteger(minPlayers) ||
+            !Number.isInteger(
+                minPlayers,
+            ) ||
             minPlayers < 0 ||
-            minPlayers > placesLimit ||
+            minPlayers >
+            placesLimit ||
             !publish
         ) {
             return undefined;
         }
 
+        const publishDaysBefore =
+            this.resolvePublishDaysBefore(
+                dayOfWeek,
+                publish.dayOfWeek,
+            );
+
+        const slot: TrainingTemplateSlot = {
+            id: '',
+            dayOfWeek,
+            startTime:
+            timeRange.startTime,
+            endTime:
+            timeRange.endTime,
+            placesLimit,
+            minPlayers,
+            publishDaysBefore,
+            publishTime:
+            publish.time,
+            enabled: true,
+        };
+
         return {
             title:
                 title ??
-                `Тренування ${this.getDayTitle(dayOfWeek)} ${timeRange.startTime}`,
-
-            dayOfWeek,
-
-            startTime: timeRange.startTime,
-            endTime: timeRange.endTime,
+                `Тренування ${this.getShortDayTitle(
+                    dayOfWeek,
+                )} ${timeRange.startTime}`,
 
             placesLimit,
             minPlayers,
 
-            publishDayOfWeek:
-            publish.dayOfWeek,
+            publishDaysBefore,
+            publishTime:
+            publish.time,
 
-            publishTime: publish.time,
+            slots: [
+                slot,
+            ],
         };
     }
 
@@ -405,23 +655,30 @@ export class TemplateFlowHandler {
         time: string;
     }
         | undefined {
-        const match = value.match(
-            /^(\S+)\s+(\d{1,2}:\d{2})$/,
-        );
+        const match =
+            value.match(
+                /^(\S+)\s+(\d{1,2}:\d{2})$/,
+            );
 
         if (!match) {
             return undefined;
         }
 
         const dayOfWeek =
-            this.parseDay(match[1]);
+            this.parseDay(
+                match[1],
+            );
 
         const time =
-            this.normalizeTime(match[2]);
+            this.normalizeTime(
+                match[2],
+            );
 
         if (
             !dayOfWeek ||
-            !this.isValidTime(time)
+            !this.isValidTime(
+                time,
+            )
         ) {
             return undefined;
         }
@@ -435,12 +692,15 @@ export class TemplateFlowHandler {
     private parseDay(
         value: string,
     ): number | undefined {
-        const normalized = value
-            .trim()
-            .toLowerCase()
-            .replace('.', '');
+        const normalized =
+            value
+                .trim()
+                .toLowerCase()
+                .replace('.', '');
 
-        return DAY_ALIASES[normalized];
+        return DAY_ALIASES[
+            normalized
+            ];
     }
 
     private parseTimeRange(
@@ -451,25 +711,38 @@ export class TemplateFlowHandler {
         endTime: string;
     }
         | undefined {
-        const match = value.match(
-            /^(\d{1,2}:\d{2})\s*[-–—]\s*(\d{1,2}:\d{2})$/,
-        );
+        const match =
+            value.match(
+                /^(\d{1,2}:\d{2})\s*[-–—]\s*(\d{1,2}:\d{2})$/,
+            );
 
         if (!match) {
             return undefined;
         }
 
         const startTime =
-            this.normalizeTime(match[1]);
+            this.normalizeTime(
+                match[1],
+            );
 
         const endTime =
-            this.normalizeTime(match[2]);
+            this.normalizeTime(
+                match[2],
+            );
 
         if (
-            !this.isValidTime(startTime) ||
-            !this.isValidTime(endTime) ||
-            this.timeToMinutes(endTime) <=
-            this.timeToMinutes(startTime)
+            !this.isValidTime(
+                startTime,
+            ) ||
+            !this.isValidTime(
+                endTime,
+            ) ||
+            this.timeToMinutes(
+                endTime,
+            ) <=
+            this.timeToMinutes(
+                startTime,
+            )
         ) {
             return undefined;
         }
@@ -483,25 +756,44 @@ export class TemplateFlowHandler {
     private normalizeTime(
         value: string,
     ): string {
-        const [hours, minutes] =
+        const [
+            hours,
+            minutes,
+        ] =
             value.split(':');
 
-        return `${hours.padStart(2, '0')}:${minutes}`;
+        return `${hours.padStart(
+            2,
+            '0',
+        )}:${minutes}`;
     }
 
     private isValidTime(
         value: string,
     ): boolean {
-        if (!/^\d{2}:\d{2}$/.test(value)) {
+        if (
+            !/^\d{2}:\d{2}$/.test(
+                value,
+            )
+        ) {
             return false;
         }
 
-        const [hours, minutes] =
-            value.split(':').map(Number);
+        const [
+            hours,
+            minutes,
+        ] =
+            value
+                .split(':')
+                .map(Number);
 
         return (
-            Number.isInteger(hours) &&
-            Number.isInteger(minutes) &&
+            Number.isInteger(
+                hours,
+            ) &&
+            Number.isInteger(
+                minutes,
+            ) &&
             hours >= 0 &&
             hours <= 23 &&
             minutes >= 0 &&
@@ -512,32 +804,111 @@ export class TemplateFlowHandler {
     private timeToMinutes(
         value: string,
     ): number {
-        const [hours, minutes] =
-            value.split(':').map(Number);
+        const [
+            hours,
+            minutes,
+        ] =
+            value
+                .split(':')
+                .map(Number);
 
-        return hours * 60 + minutes;
+        return (
+            hours * 60 +
+            minutes
+        );
     }
 
     private renderPreview(
         template: PendingTemplate,
     ): string {
+        const slot =
+            template.slots[0];
+
+        if (!slot) {
+            return 'У шаблоні немає слотів';
+        }
+
+        const publishDayOfWeek =
+            this.resolvePublishDayOfWeek(
+                slot.dayOfWeek,
+                slot.publishDaysBefore ??
+                template.publishDaysBefore,
+            );
+
         return [
-            '👀 Перевірте шаблон',
+            '👀 Перевірте дані',
             '',
             `🏸 ${template.title}`,
-            `📅 ${this.getDayTitle(template.dayOfWeek)}`,
-            `🕐 ${template.startTime}–${template.endTime}`,
-            `👥 ${template.placesLimit} місць`,
-            `🔻 Мінімум: ${template.minPlayers}`,
+            `📅 ${formatDay(
+                slot.dayOfWeek,
+            )}`,
+            `🕐 ${slot.startTime}–${slot.endTime}`,
             '',
-            `📣 Публікація: ${this.getDayTitle(template.publishDayOfWeek)} ${template.publishTime}`,
+            `👥 Місць: ${
+                slot.placesLimit ??
+                template.placesLimit
+            }`,
+            `🔻 Мінімум: ${
+                slot.minPlayers ??
+                template.minPlayers
+            }`,
+            '',
+            '📣 Публікація',
+            `📅 ${formatDay(
+                publishDayOfWeek,
+            )}`,
+            `🕐 ${
+                slot.publishTime ??
+                template.publishTime
+            }`,
         ].join('\n');
     }
 
-    private getDayTitle(
+    private getPrimarySlot(
+        slots: TrainingTemplateSlot[],
+    ): TrainingTemplateSlot | undefined {
+        return (
+            slots.find(
+                slot =>
+                    slot.enabled,
+            ) ??
+            slots[0]
+        );
+    }
+
+    private resolvePublishDaysBefore(
+        trainingDayOfWeek: number,
+        publishDayOfWeek: number,
+    ): number {
+        return (
+            trainingDayOfWeek -
+            publishDayOfWeek +
+            7
+        ) % 7;
+    }
+
+    private resolvePublishDayOfWeek(
+        trainingDayOfWeek: number,
+        publishDaysBefore: number,
+    ): number {
+        return (
+            (
+                trainingDayOfWeek -
+                publishDaysBefore -
+                1 +
+                700
+            ) %
+            7
+        ) + 1;
+    }
+
+    private getShortDayTitle(
         day: number,
     ): string {
-        const titles: Record<number, string> = {
+        const titles: Record<
+            number,
+            string
+        > = {
             1: 'Пн',
             2: 'Вт',
             3: 'Ср',
@@ -547,6 +918,26 @@ export class TemplateFlowHandler {
             7: 'Нд',
         };
 
-        return titles[day] ?? String(day);
+        return (
+            titles[day] ??
+            String(day)
+        );
+    }
+
+    private createBackToScheduleKeyboard() {
+        return Markup.inlineKeyboard([
+            [
+                Markup.button.callback(
+                    '📅 До розкладу',
+                    AdminCallbacks.Schedule,
+                ),
+            ],
+            [
+                Markup.button.callback(
+                    '🏠 Головне меню',
+                    AdminCallbacks.MainMenu,
+                ),
+            ],
+        ]);
     }
 }

@@ -7,6 +7,7 @@ type CreateTrainingInput = {
     clubId: string;
     chatId: number;
     templateId?: string;
+    templateSlotId?: string;
     title: string;
     location?: string;
     date: string;
@@ -33,6 +34,7 @@ export class TrainingService {
             id: createId('training'),
             clubId: input.clubId,
             templateId: input.templateId,
+            templateSlotId: input.templateSlotId,
             chatId: input.chatId,
             title: input.title,
             location: input.location,
@@ -98,7 +100,7 @@ export class TrainingService {
 
         console.log('Resolve training without reply:', {
             chatId: input.chatId,
-            openTrainings: openTrainings.map((training) => ({
+            openTrainings: openTrainings.map((training: Training) => ({
                 id: training.id,
                 messageId: training.messageId,
                 date: training.date,

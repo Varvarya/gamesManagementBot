@@ -186,7 +186,6 @@ export class ApplicationContext {
             new AdminTrainingHandler(
                 this.services,
                 this.trainingPublisher,
-                this.trainingCancellationScheduler,
             );
 
         const adminPlayerHandler =
@@ -327,14 +326,12 @@ export class ApplicationContext {
         const templates =
             await this.repositories.templates.listEnabled();
 
-        for (const template of templates) {
-            this.templateScheduler.syncTemplate(
-                template,
-            );
-        }
+        this.templateScheduler.restore(
+            templates,
+        );
 
         console.log(
-            `Scheduler restored: ${templates.length} template(s)`,
+            'Template scheduler restored',
         );
     }
 }

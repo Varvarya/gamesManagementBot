@@ -47,7 +47,7 @@ export class AdminMenuHandler {
                 'Панель керування клубом',
                 '',
                 activeTrainings.length > 0
-                    ? `Сьогодні та найближчим часом: ${activeTrainings.length} тренувань`
+                    ? `Найближчих тренувань: ${activeTrainings.length}`
                     : 'Активних тренувань зараз немає',
                 unconfirmedPlayers.length > 0
                     ? `⚠️ ${unconfirmedPlayers.length} гравців очікують підтвердження`

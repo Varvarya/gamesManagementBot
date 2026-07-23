@@ -1,4 +1,7 @@
+import { randomUUID } from 'node:crypto';
+
 import { RepositoriesContext } from '../../app/repositories.context';
+import { TrainingTemplate } from '../templates/template.types';
 import { TemplateSchedulerService } from '../templates/template-scheduler.service';
 import {
     ImportedClubConfig,
@@ -29,28 +32,51 @@ export class SuperAdminConfigService {
                 settings.cancelCheckHoursBefore,
             },
 
-            templates: templates.map((template) => ({
-                title: template.title,
-                location: template.location,
+            templates: templates.flatMap(
+                template =>
+                    template.slots.map(
+                        slot => ({
+                            title: template.title,
+                            location: template.location,
 
-                dayOfWeek: template.dayOfWeek,
+                            dayOfWeek:
+                            slot.dayOfWeek,
 
-                startTime: template.startTime,
-                endTime: template.endTime,
+                            startTime:
+                            slot.startTime,
+                            endTime:
+                            slot.endTime,
 
-                placesLimit: template.placesLimit,
-                minPlayers: template.minPlayers,
+                            placesLimit:
+                                slot.placesLimit ??
+                                template.placesLimit,
+                            minPlayers:
+                                slot.minPlayers ??
+                                template.minPlayers,
 
-                publishDayOfWeek:
-                template.publishDayOfWeek,
-                publishTime: template.publishTime,
+                            publishDayOfWeek:
+                                this.resolvePublishDayOfWeek(
+                                    slot.dayOfWeek,
+                                    slot.publishDaysBefore ??
+                                    template.publishDaysBefore,
+                                ),
 
-                enabled: template.enabled,
-            })),
+                            publishTime:
+                                slot.publishTime ??
+                                template.publishTime,
+
+                            enabled:
+                                template.enabled &&
+                                slot.enabled,
+                        }),
+                    ),
+            ),
         };
     }
 
-    parseImportJson(value: string): ImportedClubConfig {
+    parseImportJson(
+        value: string,
+    ): ImportedClubConfig {
         let parsed: unknown;
 
         try {
@@ -112,7 +138,15 @@ export class SuperAdminConfigService {
             return;
         }
 
-        for (const importedTemplate of config.templates) {
+        const templates =
+            await this.repositories.templates.listByClubId(
+                settings.clubId,
+            );
+
+        for (
+            const importedTemplate of
+            config.templates
+            ) {
             const chatId =
                 config.club?.chatId ??
                 settings.chatId;
@@ -124,26 +158,31 @@ export class SuperAdminConfigService {
             }
 
             const existing =
-                await this.repositories.templates.findMatching({
-                    clubId: settings.clubId,
+                this.findMatchingTemplate(
+                    templates,
                     chatId,
-                    dayOfWeek:
+                    importedTemplate,
+                );
+
+            const existingSlot =
+                existing?.slots.find(
+                    slot =>
+                        slot.dayOfWeek ===
+                        importedTemplate.dayOfWeek &&
+                        slot.startTime ===
+                        importedTemplate.startTime,
+                );
+
+            const publishDaysBefore =
+                this.resolvePublishDaysBefore(
                     importedTemplate.dayOfWeek,
-                    startTime:
-                    importedTemplate.startTime,
-                });
+                    importedTemplate.publishDayOfWeek,
+                );
 
-            const data = {
-                chatId,
-
-                title:
-                    importedTemplate.title ??
-                    this.createDefaultTemplateTitle(
-                        importedTemplate,
-                    ),
-
-                location:
-                importedTemplate.location,
+            const slot = {
+                id:
+                    existingSlot?.id ??
+                    randomUUID(),
 
                 dayOfWeek:
                 importedTemplate.dayOfWeek,
@@ -160,36 +199,109 @@ export class SuperAdminConfigService {
                 minPlayers:
                 importedTemplate.minPlayers,
 
-                publishDayOfWeek:
-                importedTemplate.publishDayOfWeek,
+                publishDaysBefore,
 
                 publishTime:
                 importedTemplate.publishTime,
 
                 enabled:
-                    importedTemplate.enabled ?? true,
+                    importedTemplate.enabled ??
+                    true,
+            };
+
+            const data = {
+                chatId,
+
+                title:
+                    importedTemplate.title ??
+                    this.createDefaultTemplateTitle(
+                        importedTemplate,
+                    ),
+
+                location:
+                importedTemplate.location,
+
+                placesLimit:
+                importedTemplate.placesLimit,
+
+                minPlayers:
+                importedTemplate.minPlayers,
+
+                publishDaysBefore,
+
+                publishTime:
+                importedTemplate.publishTime,
+
+                slots: [
+                    slot,
+                ],
+
+                enabled:
+                    importedTemplate.enabled ??
+                    true,
             };
 
             if (existing) {
-                await this.templateScheduler.update(
-                    existing.id,
-                    data,
-                );
+                const updated =
+                    await this.templateScheduler.update(
+                        existing.id,
+                        data,
+                    );
+
+                const index =
+                    templates.findIndex(
+                        template =>
+                            template.id ===
+                            existing.id,
+                    );
+
+                if (index >= 0) {
+                    templates[index] =
+                        updated;
+                }
             } else {
-                await this.templateScheduler.create({
-                    clubId: settings.clubId,
-                    ...data,
-                });
+                const created =
+                    await this.templateScheduler.create({
+                        clubId:
+                        settings.clubId,
+                        ...data,
+                    });
+
+                templates.push(
+                    created,
+                );
             }
         }
+    }
+
+    private findMatchingTemplate(
+        templates: TrainingTemplate[],
+        chatId: number,
+        importedTemplate: ImportedTemplateConfig,
+    ): TrainingTemplate | undefined {
+        return templates.find(
+            template =>
+                template.chatId ===
+                chatId &&
+                template.slots.some(
+                    slot =>
+                        slot.dayOfWeek ===
+                        importedTemplate.dayOfWeek &&
+                        slot.startTime ===
+                        importedTemplate.startTime,
+                ),
+        );
     }
 
     private validateConfig(
         config: ImportedClubConfig,
     ): void {
         if (
-            config.club?.chatId !== undefined &&
-            !Number.isInteger(config.club.chatId)
+            config.club?.chatId !==
+            undefined &&
+            !Number.isInteger(
+                config.club.chatId,
+            )
         ) {
             throw new Error(
                 'club.chatId must be an integer',
@@ -197,12 +309,17 @@ export class SuperAdminConfigService {
         }
 
         if (
-            config.club?.cancelCheckHoursBefore !== undefined &&
+            config.club
+                ?.cancelCheckHoursBefore !==
+            undefined &&
             (
                 !Number.isInteger(
-                    config.club.cancelCheckHoursBefore,
+                    config.club
+                        .cancelCheckHoursBefore,
                 ) ||
-                config.club.cancelCheckHoursBefore < 0
+                config.club
+                    .cancelCheckHoursBefore <
+                0
             )
         ) {
             throw new Error(
@@ -210,8 +327,13 @@ export class SuperAdminConfigService {
             );
         }
 
-        for (const template of config.templates ?? []) {
-            this.validateTemplate(template);
+        for (
+            const template of
+        config.templates ?? []
+            ) {
+            this.validateTemplate(
+                template,
+            );
         }
     }
 
@@ -244,8 +366,12 @@ export class SuperAdminConfigService {
         );
 
         if (
-            this.timeToMinutes(template.endTime) <=
-            this.timeToMinutes(template.startTime)
+            this.timeToMinutes(
+                template.endTime,
+            ) <=
+            this.timeToMinutes(
+                template.startTime,
+            )
         ) {
             throw new Error(
                 'endTime must be later than startTime',
@@ -297,7 +423,9 @@ export class SuperAdminConfigService {
         field: string,
     ): void {
         if (
-            !/^\d{2}:\d{2}$/.test(value)
+            !/^\d{2}:\d{2}$/.test(
+                value,
+            )
         ) {
             throw new Error(
                 `${field} must use HH:mm format`,
@@ -305,7 +433,9 @@ export class SuperAdminConfigService {
         }
 
         const [hours, minutes] =
-            value.split(':').map(Number);
+            value
+                .split(':')
+                .map(Number);
 
         if (
             hours < 0 ||
@@ -323,9 +453,40 @@ export class SuperAdminConfigService {
         value: string,
     ): number {
         const [hours, minutes] =
-            value.split(':').map(Number);
+            value
+                .split(':')
+                .map(Number);
 
-        return hours * 60 + minutes;
+        return (
+            hours * 60 +
+            minutes
+        );
+    }
+
+    private resolvePublishDaysBefore(
+        trainingDayOfWeek: number,
+        publishDayOfWeek: number,
+    ): number {
+        return (
+            trainingDayOfWeek -
+            publishDayOfWeek +
+            7
+        ) % 7;
+    }
+
+    private resolvePublishDayOfWeek(
+        trainingDayOfWeek: number,
+        publishDaysBefore: number,
+    ): number {
+        return (
+            (
+                trainingDayOfWeek -
+                publishDaysBefore -
+                1 +
+                700
+            ) %
+            7
+        ) + 1;
     }
 
     private createDefaultTemplateTitle(

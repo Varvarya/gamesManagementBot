@@ -1,13 +1,22 @@
 import { Context } from 'telegraf';
+
 import { ServicesContext } from '../../../app/services.context';
 import { TemplateSchedulerService } from '../../../domain/templates/template-scheduler.service';
 import { TrainingTemplate } from '../../../domain/templates/template.types';
+
 import { AdminCallbacks } from '../callbacks/admin-callbacks';
+
 import {
     createScheduleKeyboard,
     createTemplateDeleteKeyboard,
     createTemplateKeyboard,
 } from '../keyboards/template.keyboard';
+
+import {
+    formatDay,
+    formatTimeRange,
+    renderTemplateCard,
+} from '../ui/admin-formatters';
 
 export class AdminTemplateHandler {
     constructor(
@@ -15,9 +24,12 @@ export class AdminTemplateHandler {
         private readonly templateScheduler: TemplateSchedulerService,
     ) {}
 
-    canHandle(callback: string): boolean {
+    canHandle(
+        callback: string,
+    ): boolean {
         return (
-            callback === AdminCallbacks.Schedule ||
+            callback ===
+            AdminCallbacks.Schedule ||
             callback.startsWith(
                 AdminCallbacks.TemplatePrefix,
             )
@@ -28,8 +40,14 @@ export class AdminTemplateHandler {
         ctx: Context,
         callback: string,
     ): Promise<void> {
-        if (callback === AdminCallbacks.Schedule) {
-            await this.showSchedule(ctx);
+        if (
+            callback ===
+            AdminCallbacks.Schedule
+        ) {
+            await this.showSchedule(
+                ctx,
+            );
+
             return;
         }
 
@@ -38,12 +56,15 @@ export class AdminTemplateHandler {
                 AdminCallbacks.TemplateDeleteConfirmPrefix,
             )
         ) {
-            await this.deleteTemplate(
-                ctx,
+            const templateId =
                 callback.replace(
                     AdminCallbacks.TemplateDeleteConfirmPrefix,
                     '',
-                ),
+                );
+
+            await this.deleteTemplate(
+                ctx,
+                templateId,
             );
 
             return;
@@ -54,12 +75,15 @@ export class AdminTemplateHandler {
                 AdminCallbacks.TemplateDeletePrefix,
             )
         ) {
-            await this.confirmDelete(
-                ctx,
+            const templateId =
                 callback.replace(
                     AdminCallbacks.TemplateDeletePrefix,
                     '',
-                ),
+                );
+
+            await this.confirmDelete(
+                ctx,
+                templateId,
             );
 
             return;
@@ -70,23 +94,29 @@ export class AdminTemplateHandler {
                 AdminCallbacks.TemplateTogglePrefix,
             )
         ) {
-            await this.toggleTemplate(
-                ctx,
+            const templateId =
                 callback.replace(
                     AdminCallbacks.TemplateTogglePrefix,
                     '',
-                ),
+                );
+
+            await this.toggleTemplate(
+                ctx,
+                templateId,
             );
 
             return;
         }
 
-        await this.showTemplate(
-            ctx,
+        const templateId =
             callback.replace(
                 AdminCallbacks.TemplatePrefix,
                 '',
-            ),
+            );
+
+        await this.showTemplate(
+            ctx,
+            templateId,
         );
     }
 
@@ -101,6 +131,17 @@ export class AdminTemplateHandler {
                 settings.clubId,
             );
 
+        templates.sort(
+            (
+                first,
+                second,
+            ) =>
+                this.compareTemplates(
+                    first,
+                    second,
+                ),
+        );
+
         await this.services.adminUi.show(
             ctx,
             [
@@ -110,9 +151,13 @@ export class AdminTemplateHandler {
                     ? `Налаштовано шаблонів: ${templates.length}`
                     : 'Шаблонів поки немає',
                 '',
-                'Оберіть шаблон або створіть новий',
+                templates.length > 0
+                    ? 'Оберіть шаблон, щоб переглянути або змінити його'
+                    : 'Створіть перший шаблон тренування',
             ].join('\n'),
-            createScheduleKeyboard(templates),
+            createScheduleKeyboard(
+                templates,
+            ),
         );
     }
 
@@ -125,9 +170,14 @@ export class AdminTemplateHandler {
                 templateId,
             );
 
-        await ctx.editMessageText(
-            this.render(template),
-            createTemplateKeyboard(template),
+        await this.services.adminUi.show(
+            ctx,
+            renderTemplateCard(
+                template,
+            ),
+            createTemplateKeyboard(
+                template,
+            ),
         );
     }
 
@@ -140,17 +190,23 @@ export class AdminTemplateHandler {
                 templateId,
             );
 
-        const updated = template.enabled
-            ? await this.templateScheduler.disable(
-                templateId,
-            )
-            : await this.templateScheduler.enable(
-                templateId,
-            );
+        const updated =
+            template.enabled
+                ? await this.templateScheduler.disable(
+                    templateId,
+                )
+                : await this.templateScheduler.enable(
+                    templateId,
+                );
 
-        await ctx.editMessageText(
-            this.render(updated),
-            createTemplateKeyboard(updated),
+        await this.services.adminUi.show(
+            ctx,
+            renderTemplateCard(
+                updated,
+            ),
+            createTemplateKeyboard(
+                updated,
+            ),
         );
     }
 
@@ -163,12 +219,46 @@ export class AdminTemplateHandler {
                 templateId,
             );
 
-        await ctx.editMessageText(
+        const slotLines =
+            template.slots.length > 0
+                ? template.slots.flatMap(
+                    (
+                        slot,
+                        index,
+                    ) => [
+                        index > 0
+                            ? ''
+                            : undefined,
+                        `📅 ${formatDay(
+                            slot.dayOfWeek,
+                        )}`,
+                        `🕐 ${formatTimeRange(
+                            slot.startTime,
+                            slot.endTime,
+                        )}`,
+                    ],
+                )
+                : [
+                    '⚠️ У шаблоні немає слотів',
+                ];
+
+        await this.services.adminUi.show(
+            ctx,
             [
                 '🗑 Видалити шаблон?',
                 '',
                 `🏸 ${template.title}`,
-            ].join('\n'),
+                ...slotLines,
+                '',
+                'Після видалення автоматична публікація цього тренування припиниться',
+                '',
+                'Цю дію неможливо скасувати',
+            ]
+                .filter(
+                    (line): line is string =>
+                        line !== undefined,
+                )
+                .join('\n'),
             createTemplateDeleteKeyboard(
                 template.id,
             ),
@@ -183,26 +273,101 @@ export class AdminTemplateHandler {
             templateId,
         );
 
-        await this.showSchedule(ctx);
+        await this.showSchedule(
+            ctx,
+        );
     }
 
-    private render(
+    private compareTemplates(
+        first: TrainingTemplate,
+        second: TrainingTemplate,
+    ): number {
+        const firstSlot =
+            this.getFirstEnabledSlot(
+                first,
+            );
+
+        const secondSlot =
+            this.getFirstEnabledSlot(
+                second,
+            );
+
+        if (
+            !firstSlot &&
+            !secondSlot
+        ) {
+            return first.title.localeCompare(
+                second.title,
+                'uk',
+            );
+        }
+
+        if (!firstSlot) {
+            return 1;
+        }
+
+        if (!secondSlot) {
+            return -1;
+        }
+
+        if (
+            firstSlot.dayOfWeek !==
+            secondSlot.dayOfWeek
+        ) {
+            return (
+                firstSlot.dayOfWeek -
+                secondSlot.dayOfWeek
+            );
+        }
+
+        const timeComparison =
+            firstSlot.startTime.localeCompare(
+                secondSlot.startTime,
+            );
+
+        if (timeComparison !== 0) {
+            return timeComparison;
+        }
+
+        return first.title.localeCompare(
+            second.title,
+            'uk',
+        );
+    }
+
+    private getFirstEnabledSlot(
         template: TrainingTemplate,
-    ): string {
-        return [
-            `${
-                template.enabled
-                    ? '🟢'
-                    : '⚪️'
-            } ${template.title}`,
-            '',
-            `📅 День: ${template.dayOfWeek}`,
-            `🕐 ${template.startTime}–${template.endTime}`,
-            '',
-            `👥 Місць: ${template.placesLimit}`,
-            `🔻 Мінімум: ${template.minPlayers}`,
-            '',
-            `📣 День ${template.publishDayOfWeek} ${template.publishTime}`,
-        ].join('\n');
+    ): TrainingTemplate['slots'][number] | undefined {
+        const enabledSlots =
+            template.slots
+                .filter(
+                    slot =>
+                        slot.enabled,
+                )
+                .sort(
+                    (
+                        first,
+                        second,
+                    ) => {
+                        if (
+                            first.dayOfWeek !==
+                            second.dayOfWeek
+                        ) {
+                            return (
+                                first.dayOfWeek -
+                                second.dayOfWeek
+                            );
+                        }
+
+                        return first.startTime.localeCompare(
+                            second.startTime,
+                        );
+                    },
+                );
+
+        return (
+            enabledSlots[0] ??
+            template.slots[0]
+        );
     }
 }

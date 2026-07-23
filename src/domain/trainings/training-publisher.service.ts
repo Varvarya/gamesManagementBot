@@ -20,6 +20,25 @@ type PublishManualTrainingInput = {
     minPlayers: number;
 };
 
+export type PublishTemplateSlotInput = {
+    templateId: string;
+    slotId: string;
+
+    clubId: string;
+    chatId: number;
+
+    title: string;
+    location?: string;
+
+    date: string;
+
+    startTime: string;
+    endTime: string;
+
+    placesLimit: number;
+    minPlayers: number;
+};
+
 export class TrainingPublisherService {
     constructor(
         private readonly telegram: Telegram,
@@ -32,36 +51,6 @@ export class TrainingPublisherService {
         input: PublishManualTrainingInput,
     ): Promise<Training> {
         const training = await this.trainings.createDraft(input);
-
-        return this.publishDraft(training);
-    }
-
-    async publishFromTemplate(
-        template: TrainingTemplate,
-        trainingDate: string,
-    ): Promise<Training> {
-        const existing =
-            await this.repositories.trainings.findByTemplateAndDate(
-                template.id,
-                trainingDate,
-            );
-
-        if (existing) {
-            return existing;
-        }
-
-        const training = await this.trainings.createDraft({
-            clubId: template.clubId,
-            templateId: template.id,
-            chatId: template.chatId,
-            title: template.title,
-            location: template.location,
-            date: trainingDate,
-            startTime: template.startTime,
-            endTime: template.endTime,
-            placesLimit: template.placesLimit,
-            minPlayers: template.minPlayers,
-        });
 
         return this.publishDraft(training);
     }
@@ -151,7 +140,7 @@ export class TrainingPublisherService {
             await this.repositories.trainings.listActive();
 
         const relatedTrainings = trainings.filter(
-            (training) =>
+            (training: Training) =>
                 training.participants.some(
                     (participant) =>
                         participant.playerId === playerId,
@@ -181,5 +170,70 @@ export class TrainingPublisherService {
         ) => Promise<void>,
     ): void {
         this.onPublished = callback;
+    }
+
+    async publishTemplateSlot(
+        input: PublishTemplateSlotInput,
+    ): Promise<Training> {
+        const existing =
+            await this.repositories.trainings.findByTemplateSlotAndDate({
+                templateId:
+                input.templateId,
+
+                templateSlotId:
+                input.slotId,
+
+                date:
+                input.date,
+            });
+
+        /*
+         * Захист від дублювання після:
+         * - перезапуску;
+         * - ручного sync;
+         * - повторного спрацювання job.
+         */
+        if (existing) {
+            return existing;
+        }
+
+        const training =
+            await this.trainings.createDraft({
+                clubId:
+                input.clubId,
+
+                chatId:
+                input.chatId,
+
+                templateId:
+                input.templateId,
+
+                templateSlotId: input.slotId,
+
+                title:
+                input.title,
+
+                location:
+                input.location,
+
+                date:
+                input.date,
+
+                startTime:
+                input.startTime,
+
+                endTime:
+                input.endTime,
+
+                placesLimit:
+                input.placesLimit,
+
+                minPlayers:
+                input.minPlayers,
+            });
+
+        return this.publishDraft(
+            training,
+        );
     }
 }
