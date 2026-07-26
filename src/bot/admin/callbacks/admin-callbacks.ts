@@ -23,6 +23,8 @@ export const AdminCallbacks = {
     TemplateDeletePrefix: 'admin:template:delete:',
     TemplateDeleteConfirmPrefix:
         'admin:template:delete_confirm:',
+    TemplateChatPrefix: 'template:chat:',
+    SelectTemplateChat: 'template:chat:select',
 
     UnconfirmedPlayers:
         'admin:players:unconfirmed',

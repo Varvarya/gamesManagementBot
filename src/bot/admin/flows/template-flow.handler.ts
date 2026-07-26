@@ -5,7 +5,7 @@ import {
 
 import { ServicesContext } from '../../../app/services.context';
 import { TemplateSchedulerService } from '../../../domain/templates/template-scheduler.service';
-import { TrainingTemplateSlot } from '../../../domain/templates/template.types';
+import { CreateTrainingTemplateSlotInput } from '../../../domain/templates/template.types';
 
 import { AdminCallbacks } from '../callbacks/admin-callbacks';
 
@@ -251,20 +251,21 @@ export class TemplateFlowHandler {
                 '',
                 'Надішліть дані одним повідомленням',
                 '',
-                'Назва: Вечірнє тренування',
-                'Ср',
-                '19:30-21:30',
+                'Назва: Вечірні тренування',
+                'Ср 19:30-21:30',
+                'Пт 18:00-20:00',
                 '20',
                 '8',
-                'Вт 12:00',
+                '12:00',
                 '',
                 'Формат:',
                 '1. Назва — необовʼязково',
-                '2. День тренування',
-                '3. Час початку та завершення',
-                '4. Кількість місць',
-                '5. Мінімум гравців',
-                '6. День і час публікації',
+                '2. Один або кілька рядків: день і час тренування',
+                '3. Кількість місць',
+                '4. Мінімум гравців',
+                '5. Час публікації',
+                '',
+                'Публікація буде за день до кожного тренування.',
             ].join('\n'),
             createFlowCancelKeyboard(
                 AdminCallbacks.Schedule,
@@ -282,12 +283,7 @@ export class TemplateFlowHandler {
                 templateId,
             );
 
-        const slot =
-            this.getPrimarySlot(
-                template.slots,
-            );
-
-        if (!slot) {
+        if (!template.slots.length) {
             await this.services.adminUi.replaceWithError(
                 ctx,
                 'У шаблоні немає слотів для редагування.',
@@ -298,20 +294,6 @@ export class TemplateFlowHandler {
 
             return;
         }
-
-        const publishDaysBefore =
-            slot.publishDaysBefore ??
-            template.publishDaysBefore;
-
-        const publishTime =
-            slot.publishTime ??
-            template.publishTime;
-
-        const publishDayOfWeek =
-            this.resolvePublishDayOfWeek(
-                slot.dayOfWeek,
-                publishDaysBefore,
-            );
 
         this.services.adminFlow.start(
             adminId,
@@ -329,21 +311,19 @@ export class TemplateFlowHandler {
                 'Скопіюйте блок нижче, змініть потрібні дані та надішліть його',
                 '',
                 `Назва: ${template.title}`,
-                this.getShortDayTitle(
-                    slot.dayOfWeek,
+                ...template.slots.map(
+                    slot =>
+                        `${this.getShortDayTitle(
+                            slot.dayOfWeek,
+                        )} ${slot.startTime}-${slot.endTime}`,
                 ),
-                `${slot.startTime}-${slot.endTime}`,
                 String(
-                    slot.placesLimit ??
                     template.placesLimit,
                 ),
                 String(
-                    slot.minPlayers ??
                     template.minPlayers,
                 ),
-                `${this.getShortDayTitle(
-                    publishDayOfWeek,
-                )} ${publishTime}`,
+                template.publishTime,
             ].join('\n'),
             createFlowCancelKeyboard(
                 `${AdminCallbacks.TemplatePrefix}${template.id}`,
@@ -504,12 +484,14 @@ export class TemplateFlowHandler {
                 '',
                 'Надішліть дані так:',
                 '',
-                'Назва: Вечірнє тренування',
-                'Ср',
-                '19:30-21:30',
+                'Назва: Вечірні тренування',
+                'Ср 19:30-21:30',
+                'Пт 18:00-20:00',
                 '20',
                 '8',
-                'Вт 12:00',
+                '12:00',
+                '',
+                'Публікація буде за день до кожного тренування.',
             ].join('\n'),
             createFlowCancelKeyboard(
                 backCallback,
@@ -558,39 +540,42 @@ export class TemplateFlowHandler {
         }
 
         if (
-            dataLines.length !== 5
+            dataLines.length < 4
         ) {
             return undefined;
         }
 
-        const dayOfWeek =
-            this.parseDay(
-                dataLines[0],
-            );
-
-        const timeRange =
-            this.parseTimeRange(
-                dataLines[1],
-            );
-
-        const placesLimit =
-            Number(
-                dataLines[2],
+        const publishTime =
+            this.normalizeTime(
+                dataLines[
+                dataLines.length - 1
+                    ],
             );
 
         const minPlayers =
             Number(
-                dataLines[3],
+                dataLines[
+                dataLines.length - 2
+                    ],
             );
 
-        const publish =
-            this.parsePublishValue(
-                dataLines[4],
+        const placesLimit =
+            Number(
+                dataLines[
+                dataLines.length - 3
+                    ],
+            );
+
+        const slotLines =
+            dataLines.slice(
+                0,
+                -3,
             );
 
         if (
-            !dayOfWeek ||
-            !timeRange ||
+            !this.isValidTime(
+                publishTime,
+            ) ||
             !Number.isInteger(
                 placesLimit,
             ) ||
@@ -601,91 +586,86 @@ export class TemplateFlowHandler {
             minPlayers < 0 ||
             minPlayers >
             placesLimit ||
-            !publish
+            slotLines.length === 0
         ) {
             return undefined;
         }
 
-        const publishDaysBefore =
-            this.resolvePublishDaysBefore(
-                dayOfWeek,
-                publish.dayOfWeek,
-            );
+        const slots:
+            CreateTrainingTemplateSlotInput[] =
+            [];
 
-        const slot: TrainingTemplateSlot = {
-            id: '',
-            dayOfWeek,
-            startTime:
-            timeRange.startTime,
-            endTime:
-            timeRange.endTime,
-            placesLimit,
-            minPlayers,
-            publishDaysBefore,
-            publishTime:
-            publish.time,
-            enabled: true,
-        };
+        for (
+            const line
+            of slotLines
+            ) {
+            const match =
+                line.match(
+                    /^(\S+)\s+(\d{1,2}:\d{2}\s*[-–—]\s*\d{1,2}:\d{2})$/,
+                );
+
+            if (!match) {
+                return undefined;
+            }
+
+            const dayOfWeek =
+                this.parseDay(
+                    match[1],
+                );
+
+            const timeRange =
+                this.parseTimeRange(
+                    match[2],
+                );
+
+            if (
+                !dayOfWeek ||
+                !timeRange
+            ) {
+                return undefined;
+            }
+
+            slots.push({
+                dayOfWeek,
+
+                startTime:
+                timeRange.startTime,
+
+                endTime:
+                timeRange.endTime,
+
+                placesLimit,
+                minPlayers,
+
+                publishDaysBefore:
+                    1,
+
+                publishTime,
+
+                enabled:
+                    true,
+            });
+        }
+
+        const firstSlot =
+            slots[0];
 
         return {
             title:
                 title ??
                 `Тренування ${this.getShortDayTitle(
-                    dayOfWeek,
-                )} ${timeRange.startTime}`,
+                    firstSlot.dayOfWeek,
+                )} ${firstSlot.startTime}`,
 
             placesLimit,
             minPlayers,
 
-            publishDaysBefore,
-            publishTime:
-            publish.time,
+            publishDaysBefore:
+                1,
 
-            slots: [
-                slot,
-            ],
-        };
-    }
+            publishTime,
 
-    private parsePublishValue(
-        value: string,
-    ):
-        | {
-        dayOfWeek: number;
-        time: string;
-    }
-        | undefined {
-        const match =
-            value.match(
-                /^(\S+)\s+(\d{1,2}:\d{2})$/,
-            );
-
-        if (!match) {
-            return undefined;
-        }
-
-        const dayOfWeek =
-            this.parseDay(
-                match[1],
-            );
-
-        const time =
-            this.normalizeTime(
-                match[2],
-            );
-
-        if (
-            !dayOfWeek ||
-            !this.isValidTime(
-                time,
-            )
-        ) {
-            return undefined;
-        }
-
-        return {
-            dayOfWeek,
-            time,
+            slots,
         };
     }
 
@@ -821,85 +801,32 @@ export class TemplateFlowHandler {
     private renderPreview(
         template: PendingTemplate,
     ): string {
-        const slot =
-            template.slots[0];
-
-        if (!slot) {
+        if (
+            !template.slots.length
+        ) {
             return 'У шаблоні немає слотів';
         }
-
-        const publishDayOfWeek =
-            this.resolvePublishDayOfWeek(
-                slot.dayOfWeek,
-                slot.publishDaysBefore ??
-                template.publishDaysBefore,
-            );
 
         return [
             '👀 Перевірте дані',
             '',
             `🏸 ${template.title}`,
-            `📅 ${formatDay(
-                slot.dayOfWeek,
-            )}`,
-            `🕐 ${slot.startTime}–${slot.endTime}`,
             '',
-            `👥 Місць: ${
-                slot.placesLimit ??
-                template.placesLimit
-            }`,
-            `🔻 Мінімум: ${
-                slot.minPlayers ??
-                template.minPlayers
-            }`,
+            ...template.slots.flatMap(
+                slot => [
+                    `📅 ${formatDay(
+                        slot.dayOfWeek,
+                    )}`,
+                    `🕐 ${slot.startTime}–${slot.endTime}`,
+                ],
+            ),
             '',
-            '📣 Публікація',
-            `📅 ${formatDay(
-                publishDayOfWeek,
-            )}`,
-            `🕐 ${
-                slot.publishTime ??
-                template.publishTime
-            }`,
+            `👥 Місць: ${template.placesLimit}`,
+            `🔻 Мінімум: ${template.minPlayers}`,
+            '',
+            '📣 Публікація за день до кожного тренування',
+            `🕐 ${template.publishTime}`,
         ].join('\n');
-    }
-
-    private getPrimarySlot(
-        slots: TrainingTemplateSlot[],
-    ): TrainingTemplateSlot | undefined {
-        return (
-            slots.find(
-                slot =>
-                    slot.enabled,
-            ) ??
-            slots[0]
-        );
-    }
-
-    private resolvePublishDaysBefore(
-        trainingDayOfWeek: number,
-        publishDayOfWeek: number,
-    ): number {
-        return (
-            trainingDayOfWeek -
-            publishDayOfWeek +
-            7
-        ) % 7;
-    }
-
-    private resolvePublishDayOfWeek(
-        trainingDayOfWeek: number,
-        publishDaysBefore: number,
-    ): number {
-        return (
-            (
-                trainingDayOfWeek -
-                publishDaysBefore -
-                1 +
-                700
-            ) %
-            7
-        ) + 1;
     }
 
     private getShortDayTitle(

@@ -1,12 +1,13 @@
+import { ChatsRepository } from '../storage/repositories/chats.repository';
 import { LogsRepository } from '../storage/repositories/logs.repository';
 import { PlayersRepository } from '../storage/repositories/players.repository';
 import { SettingsRepository } from '../storage/repositories/settings.repository';
 import { TemplatesRepository } from '../storage/repositories/templates.repository';
 import { TrainingsRepository } from '../storage/repositories/trainings.repository';
 import { JsonStorage } from '../storage/jsonStorage';
-import {ClubAdmin} from "../domain/settings/settings.types";
 
 export class RepositoriesContext {
+    readonly chats: ChatsRepository;
     readonly players: PlayersRepository;
     readonly trainings: TrainingsRepository;
     readonly templates: TemplatesRepository;
@@ -16,6 +17,13 @@ export class RepositoriesContext {
     constructor(
         storage: JsonStorage,
     ) {
+        this.chats =
+            new ChatsRepository(
+                storage.getFilePath(
+                    'chats',
+                ),
+            );
+
         this.players =
             new PlayersRepository(
                 storage.getFilePath(
@@ -32,7 +40,7 @@ export class RepositoriesContext {
 
         this.templates =
             new TemplatesRepository(
-                storage
+                storage,
             );
 
         this.logs =
@@ -59,13 +67,14 @@ export class RepositoriesContext {
                     cleanChatMode: true,
 
                     createdAt: Date.now().toString(),
-                    updatedAt: Date.now().toString()
-                }
+                    updatedAt: Date.now().toString(),
+                },
             );
     }
 
     async loadAll(): Promise<void> {
         await Promise.all([
+            this.chats.load(),
             this.players.load(),
             this.trainings.load(),
             this.templates.load(),

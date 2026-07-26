@@ -7,6 +7,7 @@ export type AdminFlowState =
     | 'idle'
     | 'waiting_template_quick_input'
     | 'waiting_template_edit_input'
+    | 'waiting_template_chat_selection'
     | 'waiting_player_name'
     | 'waiting_new_player_name'
     | 'waiting_training_add_player'
@@ -23,6 +24,7 @@ export type PendingTemplate = {
 
     publishDaysBefore: number;
     publishTime: string;
+    chatId?: number;
 
     slots: CreateTrainingTemplateSlotInput[];
 };
