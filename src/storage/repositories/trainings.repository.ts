@@ -36,6 +36,17 @@ export class TrainingsRepository extends BaseJsonRepository<Training> {
         );
     }
 
+    async listArchived(input?: { month?: string; query?: string }): Promise<Training[]> {
+        const trainings = await this.list();
+        const query = input?.query?.trim().toLocaleLowerCase('uk');
+        return trainings.filter((training) => {
+            if (training.status !== 'archived' && training.status !== 'finished') return false;
+            if (input?.month && !training.date.startsWith(`${input.month}-`)) return false;
+            if (query && !training.title.toLocaleLowerCase('uk').includes(query) && !training.date.includes(query)) return false;
+            return true;
+        });
+    }
+
     async findByTemplateAndDate(
         templateId: string,
         date: string,

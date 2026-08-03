@@ -6,7 +6,8 @@ export type TrainingStatus =
     | 'open'
     | 'closed'
     | 'cancelled'
-    | 'finished';
+    | 'finished'
+    | 'archived';
 
 export type ParticipantStatus =
     | 'active'
@@ -22,6 +23,7 @@ export type ParticipantEntry = {
 
     playerId: string;
     telegramUserId?: number;
+    displayName: string;
 
     places: number;
 
@@ -50,6 +52,7 @@ export type Training = {
 
     placesLimit: number;
     minPlayers: number;
+    cancelCheckHoursBefore?: number;
 
     status: TrainingStatus;
 

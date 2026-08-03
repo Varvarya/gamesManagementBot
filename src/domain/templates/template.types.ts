@@ -57,6 +57,9 @@ export type TrainingTemplate = {
     publishDaysBefore: number;
     publishTime: string;
 
+    /** Hours before start when the minimum-player check runs. */
+    cancelCheckHoursBefore?: number;
+
     slots: TrainingTemplateSlot[];
 
     enabled: boolean;
@@ -92,6 +95,7 @@ export type CreateTrainingTemplateInput = {
 
     publishDaysBefore: number;
     publishTime: string;
+    cancelCheckHoursBefore?: number;
 
     slots: CreateTrainingTemplateSlotInput[];
 
@@ -111,6 +115,7 @@ export type UpdateTrainingTemplateSlotInput = {
 
     publishDaysBefore?: number;
     publishTime?: string;
+    cancelCheckHoursBefore?: number;
 
     enabled?: boolean;
 };

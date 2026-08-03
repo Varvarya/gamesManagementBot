@@ -2,6 +2,8 @@ import { Context, Markup } from 'telegraf';
 import { ServicesContext } from '../../app/services.context';
 import { SuperAdminConfigService } from '../../domain/config/super-admin-config.service';
 import { ImportedClubConfig } from '../../domain/config/config.types';
+import { ImportPreview } from '../../domain/config/config.types';
+import { AdminFlowState } from '../admin/flows/admin-flow.types';
 
 const IMPORT_CONFIRM_CALLBACK =
     'super_admin:import:confirm';
@@ -16,6 +18,7 @@ const IMPORT_BACK_CALLBACK =
     'super_admin:import:back';
 
 export class SuperAdminConfigHandler {
+    readonly messageStates: readonly AdminFlowState[] = ['waiting_config_import'];
     constructor(
         private readonly services: ServicesContext,
         private readonly configService: SuperAdminConfigService,
@@ -35,7 +38,8 @@ export class SuperAdminConfigHandler {
             'waiting_config_import',
         );
 
-        await ctx.reply(
+        await this.services.adminUi.show(
+            ctx,
             this.renderImportPrompt(),
             this.createImportKeyboard(),
         );
@@ -49,46 +53,52 @@ export class SuperAdminConfigHandler {
         const config =
             await this.configService.exportConfig();
 
-        await ctx.reply(
-            [
-                '📤 Поточна конфігурація',
-                '',
-                '```json',
-                JSON.stringify(config, null, 2),
-                '```',
-            ].join('\n'),
-            {
-                parse_mode: 'Markdown',
-            },
+        const date = new Date().toISOString().slice(0, 10);
+        const message = await ctx.replyWithDocument(
+            { source: Buffer.from(`${JSON.stringify(config, null, 2)}\n`), filename: `club-config-${date}.json` },
+            { caption: '📤 Конфігурацію експортовано' },
         );
+        if (ctx.chat?.type === 'private' && ctx.from) this.services.adminUi.trackBotMessage(ctx.from.id, ctx.chat.id, message.message_id);
     }
 
-    async handleText(ctx: Context): Promise<boolean> {
+    async createBackup(ctx: Context): Promise<void> {
+        if (!this.getSuperAdminId(ctx)) return;
+        try {
+            const result = await this.configService.createBackup();
+            await this.services.adminUi.notice(ctx, `✅ Резервну копію створено\nФайлів: ${result.files.length}\n${result.directory}`);
+        } catch (error) {
+            await this.services.adminUi.notice(ctx, `❌ ${error instanceof Error ? error.message : 'Не вдалося створити резервну копію'}`);
+        }
+    }
+
+    canHandleMessage(adminId: number): boolean {
+        return this.services.adminFlow.getState(adminId) === 'waiting_config_import';
+    }
+
+    async handleMessage(ctx: Context): Promise<boolean> {
         const superAdminId =
             this.getSuperAdminId(ctx);
 
-        if (
-            !superAdminId ||
-            !ctx.message ||
-            !('text' in ctx.message)
-        ) {
+        if (!superAdminId || !ctx.message) {
             return false;
         }
 
-        const state =
-            this.services.adminFlow.getState(
-                superAdminId,
-            );
-
-        if (state !== 'waiting_config_import') {
+        if (!this.canHandleMessage(superAdminId)) {
             return false;
         }
 
         try {
+            const json = 'text' in ctx.message
+                ? ctx.message.text
+                : 'document' in ctx.message
+                    ? await this.readImportDocument(ctx, ctx.message.document)
+                    : undefined;
+            if (!json) return false;
             const config =
                 this.configService.parseImportJson(
-                    ctx.message.text,
+                    json,
                 );
+            const preview = await this.configService.previewImport(config);
 
             this.services.adminFlow.setData(
                 superAdminId,
@@ -97,12 +107,14 @@ export class SuperAdminConfigHandler {
                 },
             );
 
-            await ctx.reply(
-                this.renderImportPreview(config),
+            await this.services.adminUi.show(
+                ctx,
+                this.renderImportPreview(config, preview),
                 this.createImportConfirmationKeyboard(),
             );
         } catch (error) {
-            await ctx.reply(
+            await this.services.adminUi.show(
+                ctx,
                 [
                     '❌ Помилка конфігурації',
                     '',
@@ -215,59 +227,31 @@ export class SuperAdminConfigHandler {
         return [
             '📦 Імпорт конфігурації',
             '',
-            'Надішліть JSON одним повідомленням',
+            'Надішліть JSON одним повідомленням або файлом до 1 МБ.',
             '',
-            'Існуючі шаблони з тим самим днем і часом будуть оновлені',
-            'Нові шаблони будуть створені',
+            'Перед збереженням ви побачите всі зміни.',
+            'Перед перезаписом бот автоматично створить резервну копію.',
         ].join('\n');
     }
 
     private renderImportHelp(): string {
         const example = {
-            club: {
-                title: 'Badminton Club',
-                timezone: 'Europe/Kyiv',
-                chatId: -1001234567890,
-                cancelCheckHoursBefore: 4,
+            schemaVersion: 1,
+            data: {
+                settings: { clubId: 'club', title: 'Клуб', timezone: 'Europe/Kyiv', admins: [], cleanChatMode: true, createdAt: '...', updatedAt: '...' },
+                chats: [{ id: -1001234567890, name: 'Група клубу', enabled: true }],
+                players: [],
+                templates: [],
             },
-            templates: [
-                {
-                    title: 'Вечірнє тренування',
-                    location: 'Зал 1',
-                    dayOfWeek: 1,
-                    startTime: '19:30',
-                    endTime: '21:30',
-                    placesLimit: 16,
-                    minPlayers: 8,
-                    publishDayOfWeek: 7,
-                    publishTime: '18:00',
-                    enabled: true,
-                },
-            ],
         };
 
         return [
             '📖 <b>Формат конфігурації</b>',
             '',
-            '<b>club</b> — налаштування клубу',
-            '',
-            '<code>title</code> — назва клубу',
-            '<code>timezone</code> — часовий пояс',
-            '<code>chatId</code> — ID групового чату',
-            '<code>cancelCheckHoursBefore</code> — за скільки годин перевіряти мінімум гравців',
-            '',
-            '<b>templates</b> — список тренувань',
-            '',
-            '<code>title</code> — назва тренування, необовʼязково',
-            '<code>location</code> — місце, необовʼязково',
-            '<code>dayOfWeek</code> — день тренування, 1 = Пн, 7 = Нд',
-            '<code>startTime</code> — час початку HH:mm',
-            '<code>endTime</code> — час завершення HH:mm',
-            '<code>placesLimit</code> — максимальна кількість місць',
-            '<code>minPlayers</code> — мінімум гравців',
-            '<code>publishDayOfWeek</code> — день публікації, 1 = Пн, 7 = Нд',
-            '<code>publishTime</code> — час публікації HH:mm',
-            '<code>enabled</code> — true або false',
+            'Найбезпечніше імпортувати файл, який бот створив командою /export.',
+            'Файл містить налаштування, чати, гравців і розклади.',
+            'Перед підтвердженням бот покаже кількість доданих, змінених і видалених записів.',
+            'Перед перезаписом автоматично створюється резервна копія.',
             '',
             '<b>Приклад:</b>',
             '',
@@ -279,9 +263,23 @@ export class SuperAdminConfigHandler {
 
     private renderImportPreview(
         config: ImportedClubConfig,
+        preview: ImportPreview,
     ): string {
+        if (preview.mode === 'snapshot') {
+            return [
+                '📦 Перевірте зміни',
+                '',
+                `⚙️ Налаштування: ${preview.settingsChanged ? 'будуть оновлені' : 'без змін'}`,
+                renderSection('💬 Чати', preview.chats),
+                renderSection('👥 Гравці', preview.players),
+                renderSection('📅 Розклади', preview.templates),
+                '',
+                'Елементи, яких немає у файлі, буде видалено.',
+                'Перед імпортом буде створено резервну копію.',
+            ].join('\n');
+        }
         return [
-            '📦 Імпорт конфігурації',
+            '📦 Перевірте зміни (старий формат)',
             '',
             config.club?.title
                 ? `🏸 ${config.club.title}`
@@ -290,6 +288,8 @@ export class SuperAdminConfigHandler {
             `Шаблонів: ${
                 config.templates?.length ?? 0
             }`,
+            'Чати та гравці не зміняться.',
+            'Перед імпортом буде створено резервну копію.',
             '',
             ...(config.templates ?? []).map(
                 (template) =>
@@ -365,6 +365,17 @@ export class SuperAdminConfigHandler {
             .replace(/>/g, '&gt;');
     }
 
+    private async readImportDocument(ctx: Context, document: { file_id: string; file_size?: number; file_name?: string; mime_type?: string }): Promise<string> {
+        if ((document.file_size ?? 0) > 1_000_000) throw new Error('Файл завеликий. Максимальний розмір — 1 МБ.');
+        if (document.file_name && !document.file_name.toLowerCase().endsWith('.json')) throw new Error('Надішліть файл у форматі JSON.');
+        const url = await ctx.telegram.getFileLink(document.file_id);
+        const response = await fetch(url);
+        if (!response.ok) throw new Error('Не вдалося завантажити файл. Спробуйте ще раз.');
+        const text = await response.text();
+        if (Buffer.byteLength(text, 'utf8') > 1_000_000) throw new Error('Файл завеликий. Максимальний розмір — 1 МБ.');
+        return text;
+    }
+
     private getSuperAdminId(
         ctx: Context,
     ): number | undefined {
@@ -380,4 +391,8 @@ export class SuperAdminConfigHandler {
 
         return ctx.from.id;
     }
+}
+
+function renderSection(title: string, section: ImportPreview['chats']): string {
+    return `${title}: ${section.incoming} після імпорту  ·  +${section.added}  ~${section.updated}  −${section.removed}`;
 }

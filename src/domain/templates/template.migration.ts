@@ -1,5 +1,3 @@
-import { randomUUID } from 'node:crypto';
-
 import {
     TrainingTemplate,
     TrainingTemplateSlot,
@@ -43,18 +41,11 @@ export function migrateTrainingTemplates(
         return [];
     }
 
-    return value
-        .map((item) =>
-            migrateTrainingTemplate(
-                item as UnknownTemplate,
-            ),
-        )
-        .filter(
-            (
-                template,
-            ): template is TrainingTemplate =>
-                template !== undefined,
-        );
+    return value.map((item, index) => {
+        const migrated = migrateTrainingTemplate(item as UnknownTemplate);
+        if (!migrated) throw new Error(`Invalid training template at index ${index}; migration refused to discard it`);
+        return migrated;
+    });
 }
 
 export function migrateTrainingTemplate(
@@ -96,7 +87,7 @@ function migrateCurrentTemplate(
         id: value.id,
 
         clubId: value.clubId,
-        chatId: value.chatId,
+        chatId: resolveChatId(value),
 
         title: value.title,
         location: value.location,
@@ -107,19 +98,20 @@ function migrateCurrentTemplate(
         minPlayers:
         value.minPlayers,
 
+        // Keep a missing value visible to the cross-repository migration,
+        // which can then use the club's legacy default without data loss.
         publishDaysBefore:
-            Number.isInteger(
-                value.publishDaysBefore,
-            )
-                ? value.publishDaysBefore
-                : 1,
+            value.publishDaysBefore,
 
         publishTime:
         value.publishTime,
 
-        slots: value.slots.map(
-            migrateCurrentSlot,
-        ),
+        cancelCheckHoursBefore:
+            Number.isInteger(value.cancelCheckHoursBefore) && value.cancelCheckHoursBefore! >= 0
+                ? value.cancelCheckHoursBefore
+                : undefined,
+
+        slots: value.slots.map((slot, index) => migrateCurrentSlot(slot, value.id, index)),
 
         enabled:
             value.enabled !== false,
@@ -134,11 +126,13 @@ function migrateCurrentTemplate(
 
 function migrateCurrentSlot(
     slot: TrainingTemplateSlot,
+    templateId: string,
+    index: number,
 ): TrainingTemplateSlot {
     return {
         id:
             slot.id ||
-            createSlotId(),
+            createSlotId(templateId, index),
 
         dayOfWeek:
         slot.dayOfWeek,
@@ -149,17 +143,10 @@ function migrateCurrentSlot(
         endTime:
         slot.endTime,
 
-        placesLimit:
-        slot.placesLimit,
-
-        minPlayers:
-        slot.minPlayers,
-
-        publishDaysBefore:
-        slot.publishDaysBefore,
-
-        publishTime:
-        slot.publishTime,
+        ...(slot.placesLimit !== undefined ? { placesLimit: slot.placesLimit } : {}),
+        ...(slot.minPlayers !== undefined ? { minPlayers: slot.minPlayers } : {}),
+        ...(slot.publishDaysBefore !== undefined ? { publishDaysBefore: slot.publishDaysBefore } : {}),
+        ...(slot.publishTime !== undefined ? { publishTime: slot.publishTime } : {}),
 
         enabled:
             slot.enabled !== false,
@@ -179,7 +166,7 @@ function migrateLegacyTemplate(
         id: value.id,
 
         clubId: value.clubId,
-        chatId: value.chatId,
+        chatId: resolveChatId(value),
 
         title: value.title,
         location: value.location,
@@ -194,9 +181,11 @@ function migrateLegacyTemplate(
         publishTime:
         value.publishTime,
 
+        cancelCheckHoursBefore: undefined,
+
         slots: [
             {
-                id: createSlotId(),
+                id: createSlotId(value.id, 0),
 
                 dayOfWeek:
                 value.dayOfWeek,
@@ -251,6 +240,14 @@ function calculatePublishDaysBefore(
     return difference;
 }
 
-function createSlotId(): string {
-    return `slot_${randomUUID()}`;
+function createSlotId(templateId: string, index: number): string {
+    return `slot_${templateId.replace(/[^a-zA-Z0-9_-]/g, '_')}_${index}`;
+}
+
+function resolveChatId(value: Record<string, unknown> | TrainingTemplate | LegacyTrainingTemplate): number {
+    const record = value as Record<string, unknown>;
+    const nested = record.gameChat ?? record.chat;
+    const chatId = record.chatId ?? (nested && typeof nested === 'object' ? (nested as Record<string, unknown>).id : nested);
+    if (!Number.isSafeInteger(chatId)) throw new Error(`Template ${String(record.id)} has no valid chatId`);
+    return chatId as number;
 }

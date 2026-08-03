@@ -1,6 +1,7 @@
 import { RepositoriesContext } from '../../app/repositories.context';
 import { createId } from '../../utils/ids';
 import { nowIso } from '../../utils/date';
+import { logger } from '../../utils/logger';
 import { Training, TrainingStatus } from './training.types';
 
 type CreateTrainingInput = {
@@ -15,6 +16,7 @@ type CreateTrainingInput = {
     endTime: string;
     placesLimit: number;
     minPlayers: number;
+    cancelCheckHoursBefore?: number;
 };
 
 type PublishTrainingInput = {
@@ -23,6 +25,8 @@ type PublishTrainingInput = {
 };
 
 export class TrainingService {
+    private onChanged?: (training: Training) => Promise<void>;
+
     constructor(
         private readonly repositories: RepositoriesContext,
     ) {}
@@ -43,6 +47,7 @@ export class TrainingService {
             endTime: input.endTime,
             placesLimit: input.placesLimit,
             minPlayers: input.minPlayers,
+            cancelCheckHoursBefore: input.cancelCheckHoursBefore ?? 4,
             status: 'draft',
             participants: [],
             waitlist: [],
@@ -75,6 +80,8 @@ export class TrainingService {
     async resolveTargetTraining(input: {
         chatId: number;
         replyToMessageId?: number;
+        date?: string;
+        startTime?: string;
     }): Promise<Training | undefined> {
         if (input.replyToMessageId) {
             const training =
@@ -82,13 +89,6 @@ export class TrainingService {
                     input.chatId,
                     input.replyToMessageId,
                 );
-
-            console.log('Resolve training by reply:', {
-                chatId: input.chatId,
-                replyToMessageId: input.replyToMessageId,
-                trainingId: training?.id,
-                status: training?.status,
-            });
 
             return training;
         }
@@ -98,20 +98,20 @@ export class TrainingService {
                 input.chatId,
             );
 
-        console.log('Resolve training without reply:', {
-            chatId: input.chatId,
-            openTrainings: openTrainings.map((training: Training) => ({
-                id: training.id,
-                messageId: training.messageId,
-                date: training.date,
-                startTime: training.startTime,
-                status: training.status,
-            })),
-        });
+        if (openTrainings.length === 1 && !input.date && !input.startTime) {
+            return openTrainings[0];
+        }
 
-        return openTrainings.length === 1
-            ? openTrainings[0]
-            : undefined;
+        if (!input.date && !input.startTime) {
+            return undefined;
+        }
+
+        const matches = openTrainings.filter((training) =>
+            (!input.date || training.date === input.date) &&
+            (!input.startTime || training.startTime === input.startTime),
+        );
+
+        return matches.length === 1 ? matches[0] : undefined;
     }
 
     async updateStatus(
@@ -123,10 +123,16 @@ export class TrainingService {
         training.status = status;
         training.updatedAt = nowIso();
 
-        return this.repositories.trainings.save(training);
+        const saved = await this.repositories.trainings.save(training);
+        await this.notifyChanged(saved);
+        return saved;
     }
 
     async open(trainingId: string): Promise<Training> {
+        const training = await this.getRequired(trainingId);
+        if (training.status === 'archived' || training.status === 'finished') {
+            throw new Error('Archived training is read-only');
+        }
         return this.updateStatus(trainingId, 'open');
     }
 
@@ -139,7 +145,7 @@ export class TrainingService {
     }
 
     async finish(trainingId: string): Promise<Training> {
-        return this.updateStatus(trainingId, 'finished');
+        return this.updateStatus(trainingId, 'archived');
     }
 
     async updatePlacesLimit(
@@ -155,7 +161,9 @@ export class TrainingService {
         training.placesLimit = placesLimit;
         training.updatedAt = nowIso();
 
-        return this.repositories.trainings.save(training);
+        const saved = await this.repositories.trainings.save(training);
+        await this.notifyChanged(saved);
+        return saved;
     }
 
     async updateMinPlayers(
@@ -171,13 +179,29 @@ export class TrainingService {
         training.minPlayers = minPlayers;
         training.updatedAt = nowIso();
 
-        return this.repositories.trainings.save(training);
+        const saved = await this.repositories.trainings.save(training);
+        await this.notifyChanged(saved);
+        return saved;
     }
 
     async save(training: Training): Promise<Training> {
         training.updatedAt = nowIso();
+        const saved = await this.repositories.trainings.save(training);
+        await this.notifyChanged(saved);
+        return saved;
+    }
 
-        return this.repositories.trainings.save(training);
+    setOnChanged(callback: (training: Training) => Promise<void>): void {
+        this.onChanged = callback;
+    }
+
+    private async notifyChanged(training: Training): Promise<void> {
+        if (!this.onChanged || !training.messageId) return;
+        try {
+            await this.onChanged(training);
+        } catch (error) {
+            logger.error('publication.automatic_refresh_failed', { trainingId: training.id, error });
+        }
     }
 
     async getRequired(trainingId: string): Promise<Training> {

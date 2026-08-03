@@ -1,57 +1,44 @@
 import 'dotenv/config';
 import { ApplicationContext } from './app/application.context';
 import { loadEnv } from './config/env';
+import { configureLogger, logger } from './utils/logger';
 
 async function main(): Promise<void> {
-    console.log('[BOOT] main started');
-
     const env = loadEnv();
-
-    console.log('[BOOT] env loaded');
+    configureLogger(env.logLevel);
 
     const application = await ApplicationContext.create({
         botToken: env.botToken,
         dataDir: env.dataDir,
         clubId: env.clubId,
+        clubName: env.clubName,
         superAdminIds: env.superAdminIds,
+        defaultTimezone: env.defaultTimezone,
     });
 
-    console.log('[BOOT] application created');
-
     process.once('SIGINT', () => {
-        console.log('[BOOT] SIGINT received');
-        application.stop('SIGINT');
+        logger.info('process.signal_received', { signal: 'SIGINT' });
+        void application.stop('SIGINT').catch((error) => logger.error('application.shutdown_failed', { signal: 'SIGINT', error }));
     });
 
     process.once('SIGTERM', () => {
-        console.log('[BOOT] SIGTERM received');
-        application.stop('SIGTERM');
+        logger.info('process.signal_received', { signal: 'SIGTERM' });
+        void application.stop('SIGTERM').catch((error) => logger.error('application.shutdown_failed', { signal: 'SIGTERM', error }));
     });
 
-    console.log('[BOOT] starting application');
-
     await application.start();
-
-    console.log('[BOOT] application.start resolved');
 }
 
 void main().catch((error: unknown) => {
-    console.error('[BOOT] Failed to start application:', error);
+    logger.error('application.start_failed', { error });
     process.exitCode = 1;
 });
 
-process.on('beforeExit', (code) => {
-    console.log('[PROCESS] beforeExit', code);
-});
-
-process.on('exit', (code) => {
-    console.log('[PROCESS] exit', code);
-});
-
 process.on('uncaughtException', (error) => {
-    console.error('[PROCESS] uncaughtException', error);
+    logger.error('process.uncaught_exception', { error });
+    process.exitCode = 1;
 });
 
 process.on('unhandledRejection', (reason) => {
-    console.error('[PROCESS] unhandledRejection', reason);
+    logger.error('process.unhandled_rejection', { error: reason });
 });

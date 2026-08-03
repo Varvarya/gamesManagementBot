@@ -8,15 +8,15 @@ export type ClubAdmin = {
 export type ClubSettings = {
     clubId: string;
     title: string;
+    storageSlug: string;
 
     chatId?: number;
     timezone: string;
-
     admins: ClubAdmin[];
-
-    cancelCheckHoursBefore: number;
     cleanChatMode: boolean;
 
     createdAt: string;
     updatedAt: string;
+    lastBackupAt?: string;
+    latestError?: string;
 };

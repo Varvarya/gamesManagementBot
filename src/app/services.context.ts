@@ -9,6 +9,7 @@ import { TrainingParticipantsService } from '../domain/trainings/training-partic
 import { TrainingService } from '../domain/trainings/training.service';
 import { SchedulerService } from '../scheduler/scheduler.service';
 import { RepositoriesContext } from './repositories.context';
+import { SettingsService } from '../domain/settings/settings.service';
 
 export class ServicesContext {
     readonly repositories: RepositoriesContext;
@@ -22,6 +23,7 @@ export class ServicesContext {
     readonly templates: TemplateService;
     readonly chats: ChatService;
     readonly adminFlow: AdminFlowService;
+    readonly settings: SettingsService;
 
     readonly adminUi: AdminUi;
 
@@ -64,6 +66,7 @@ export class ServicesContext {
 
         this.adminFlow =
             new AdminFlowService();
+        this.settings = new SettingsService(repositories);
 
         this.trainingMessageRenderer =
             new TrainingMessageRenderer();

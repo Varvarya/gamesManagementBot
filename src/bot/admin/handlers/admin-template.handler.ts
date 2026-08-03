@@ -44,6 +44,7 @@ export class AdminTemplateHandler {
             callback ===
             AdminCallbacks.Schedule
         ) {
+            if (ctx.from) this.services.adminFlow.finish(ctx.from.id);
             await this.showSchedule(
                 ctx,
             );
@@ -199,11 +200,9 @@ export class AdminTemplateHandler {
                     templateId,
                 );
 
-        await this.services.adminUi.show(
+        await this.services.adminUi.replaceWithSuccess(
             ctx,
-            renderTemplateCard(
-                updated,
-            ),
+            `${updated.enabled ? 'Шаблон увімкнено.' : 'Шаблон вимкнено.'}\n\n${renderTemplateCard(updated)}`,
             createTemplateKeyboard(
                 updated,
             ),
@@ -272,10 +271,10 @@ export class AdminTemplateHandler {
         await this.templateScheduler.delete(
             templateId,
         );
-
-        await this.showSchedule(
-            ctx,
-        );
+        const settings = await this.services.repositories.settings.get();
+        const templates = await this.services.templates.listByClubId(settings.clubId);
+        templates.sort((first, second) => this.compareTemplates(first, second));
+        await this.services.adminUi.replaceWithSuccess(ctx, templates.length ? 'Шаблон видалено. Оберіть інший шаблон.' : 'Шаблон видалено. Розклад порожній — створіть новий шаблон.', createScheduleKeyboard(templates));
     }
 
     private compareTemplates(

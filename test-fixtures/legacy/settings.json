@@ -1,0 +1,11 @@
+{
+  "clubId": "club",
+  "title": "Legacy Club",
+  "chatId": -1001,
+  "timezone": "Europe/Kyiv",
+  "admins": [{ "telegramUserId": 1, "role": "owner" }],
+  "cancelCheckHoursBefore": 4,
+  "cleanChatMode": true,
+  "createdAt": "2025-01-01T00:00:00.000Z",
+  "updatedAt": "2025-01-01T00:00:00.000Z"
+}

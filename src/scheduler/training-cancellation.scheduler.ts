@@ -3,6 +3,7 @@ import { RepositoriesContext } from '../app/repositories.context';
 import { TrainingPublisherService } from '../domain/trainings/training-publisher.service';
 import { TrainingService } from '../domain/trainings/training.service';
 import { Training } from '../domain/trainings/training.types';
+import { logger } from '../utils/logger';
 
 export class TrainingCancellationScheduler {
     private readonly jobs = new Map<string, Job>();
@@ -28,19 +29,18 @@ export class TrainingCancellationScheduler {
         this.cancel(training.id);
 
         if (
-            training.status !== 'open' &&
-            training.status !== 'closed'
+            training.status !== 'open'
         ) {
             return;
         }
 
-        const settings =
-            await this.repositories.settings.get();
+        let hoursBefore = training.cancelCheckHoursBefore;
+        if (hoursBefore === undefined && training.templateId) {
+            const template = await this.repositories.templates.findById(training.templateId);
+            hoursBefore = template?.cancelCheckHoursBefore;
+        }
 
-        const checkAt = this.getCheckDate(
-            training,
-            settings.cancelCheckHoursBefore,
-        );
+        const checkAt = this.getCheckDate(training, hoursBefore ?? 4);
 
         if (checkAt.getTime() <= Date.now()) {
             await this.check(training.id);
@@ -53,10 +53,7 @@ export class TrainingCancellationScheduler {
                 try {
                     await this.check(training.id);
                 } catch (error) {
-                    console.error(
-                        `Failed to check training ${training.id}`,
-                        error,
-                    );
+                    logger.error('scheduler.cancellation_check_failed', { trainingId: training.id, error });
                 } finally {
                     this.jobs.delete(training.id);
                 }
@@ -70,6 +67,7 @@ export class TrainingCancellationScheduler {
         }
 
         this.jobs.set(training.id, job);
+        logger.info('scheduler.cancellation_check_scheduled', { trainingId: training.id, checkAt: checkAt.toISOString() });
     }
 
     cancel(trainingId: string): void {
@@ -81,6 +79,7 @@ export class TrainingCancellationScheduler {
 
         job.cancel();
         this.jobs.delete(trainingId);
+        logger.info('scheduler.cancellation_check_cancelled', { trainingId });
     }
 
     cancelAll(): void {
@@ -91,6 +90,10 @@ export class TrainingCancellationScheduler {
         this.jobs.clear();
     }
 
+    getJobCount(): number {
+        return this.jobs.size;
+    }
+
     private async check(
         trainingId: string,
     ): Promise<void> {
@@ -98,8 +101,7 @@ export class TrainingCancellationScheduler {
             await this.trainings.getRequired(trainingId);
 
         if (
-            training.status !== 'open' &&
-            training.status !== 'closed'
+            training.status !== 'open'
         ) {
             return;
         }
@@ -118,7 +120,9 @@ export class TrainingCancellationScheduler {
         }
 
         await this.trainings.cancel(training.id);
+        logger.info('scheduler.training_cancelled', { trainingId: training.id, registeredPlaces, minimumPlayers: training.minPlayers });
         await this.publisher.refreshMessage(training.id);
+        await this.publisher.notifyCancellation(training.id);
     }
 
     private getCheckDate(

@@ -13,3 +13,10 @@ export function createFlowCancelKeyboard(
         ],
     ]);
 }
+
+export function createFlowNavigationKeyboard(backCallback: string, cancelCallback: string) {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback('◀️ Назад', backCallback)],
+        [Markup.button.callback('❌ Скасувати', cancelCallback)],
+    ]);
+}

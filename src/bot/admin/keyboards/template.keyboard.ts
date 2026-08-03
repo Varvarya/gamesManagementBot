@@ -1,5 +1,6 @@
 import { Markup } from 'telegraf';
 import { TrainingTemplate } from '../../../domain/templates/template.types';
+import { ChatConfig } from '../../../domain/chats/chat.types';
 import { AdminCallbacks } from '../callbacks/admin-callbacks';
 
 export function createScheduleKeyboard(
@@ -70,7 +71,7 @@ export function createTemplateDeleteKeyboard(
     return Markup.inlineKeyboard([
         [
             Markup.button.callback(
-                '🗑 Так, видалити',
+                '✅ Підтвердити видалення',
                 `${AdminCallbacks.TemplateDeleteConfirmPrefix}${templateId}`,
             ),
         ],
@@ -90,11 +91,73 @@ export function createTemplatePreviewKeyboard(
         [
             Markup.button.callback(
                 mode === 'create'
-                    ? '✅ Створити'
-                    : '✅ Зберегти зміни',
+                    ? '✅ Підтвердити створення'
+                    : '✅ Підтвердити зміни',
                 mode === 'create'
                     ? AdminCallbacks.ConfirmCreateTemplate
                     : AdminCallbacks.ConfirmEditTemplate,
+            ),
+        ],
+        [
+            Markup.button.callback(
+                '💬 Змінити чат',
+                AdminCallbacks.SelectTemplateChat,
+            ),
+        ],
+        [Markup.button.callback('◀️ Назад', AdminCallbacks.BackFromTemplatePreview)],
+        [
+            Markup.button.callback(
+                '❌ Скасувати',
+                mode === 'create'
+                    ? AdminCallbacks.CancelCreateTemplate
+                    : AdminCallbacks.CancelEditTemplate,
+            ),
+        ],
+    ]);
+}
+
+export function createTemplateChatSelectionKeyboard(
+    chats: ChatConfig[],
+    mode: 'create' | 'edit',
+) {
+    return Markup.inlineKeyboard([
+        ...chats.map(chat => [
+            Markup.button.callback(
+                `💬 ${chat.name}`,
+                `${AdminCallbacks.TemplateChatPrefix}${chat.id}`,
+            ),
+        ]),
+        [
+            Markup.button.callback(
+                '◀️ Назад',
+                AdminCallbacks.BackFromTemplateChat,
+            ),
+        ],
+        [
+            Markup.button.callback(
+                '❌ Скасувати',
+                mode === 'create'
+                    ? AdminCallbacks.CancelCreateTemplate
+                    : AdminCallbacks.CancelEditTemplate,
+            ),
+        ],
+    ]);
+}
+
+export function createNoTemplateChatsKeyboard(
+    mode: 'create' | 'edit',
+) {
+    return Markup.inlineKeyboard([
+        [
+            Markup.button.callback(
+                '💬 До чатів',
+                AdminCallbacks.Chats,
+            ),
+        ],
+        [
+            Markup.button.callback(
+                '◀️ Назад',
+                AdminCallbacks.BackFromTemplateChat,
             ),
         ],
         [

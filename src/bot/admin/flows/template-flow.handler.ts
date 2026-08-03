@@ -5,13 +5,15 @@ import {
 
 import { ServicesContext } from '../../../app/services.context';
 import { TemplateSchedulerService } from '../../../domain/templates/template-scheduler.service';
-import { CreateTrainingTemplateSlotInput } from '../../../domain/templates/template.types';
+import { UpdateTrainingTemplateSlotInput } from '../../../domain/templates/template.types';
 
 import { AdminCallbacks } from '../callbacks/admin-callbacks';
 
 import { createFlowCancelKeyboard } from '../keyboards/flow.keyboard';
 import {
     createTemplateKeyboard,
+    createTemplateChatSelectionKeyboard,
+    createNoTemplateChatsKeyboard,
     createTemplatePreviewKeyboard,
 } from '../keyboards/template.keyboard';
 
@@ -20,7 +22,7 @@ import {
     renderTemplateCard,
 } from '../ui/admin-formatters';
 
-import { PendingTemplate } from './admin-flow.types';
+import { AdminFlowState, PendingTemplate } from './admin-flow.types';
 
 const DAY_ALIASES: Record<string, number> = {
     '1': 1,
@@ -66,6 +68,8 @@ type TemplateFlowMode =
     | 'edit';
 
 export class TemplateFlowHandler {
+    readonly textStates: readonly AdminFlowState[] = ['waiting_template_quick_input', 'waiting_template_edit_input'];
+    readonly callbackStates: readonly AdminFlowState[] = ['waiting_template_chat_selection'];
     constructor(
         private readonly services: ServicesContext,
         private readonly templateScheduler: TemplateSchedulerService,
@@ -80,6 +84,12 @@ export class TemplateFlowHandler {
             callback === AdminCallbacks.CancelCreateTemplate ||
             callback === AdminCallbacks.ConfirmEditTemplate ||
             callback === AdminCallbacks.CancelEditTemplate ||
+            callback === AdminCallbacks.SelectTemplateChat ||
+            callback === AdminCallbacks.BackFromTemplateChat ||
+            callback === AdminCallbacks.BackFromTemplatePreview ||
+            callback.startsWith(
+                AdminCallbacks.TemplateChatPrefix,
+            ) ||
             callback.startsWith(
                 AdminCallbacks.TemplateEditPrefix,
             )
@@ -93,6 +103,47 @@ export class TemplateFlowHandler {
         const adminId = ctx.from?.id;
 
         if (!adminId) {
+            return;
+        }
+
+        if (
+            callback === AdminCallbacks.SelectTemplateChat
+        ) {
+            await this.showChatSelection(
+                ctx,
+                adminId,
+                this.getMode(adminId),
+            );
+            return;
+        }
+
+        if (
+            callback === AdminCallbacks.BackFromTemplateChat
+        ) {
+            await this.backFromChatSelection(
+                ctx,
+                adminId,
+            );
+            return;
+        }
+
+        if (callback === AdminCallbacks.BackFromTemplatePreview) {
+            const mode = this.getMode(adminId);
+            this.services.adminFlow.transition(adminId, mode === 'edit' ? 'waiting_template_edit_input' : 'waiting_template_quick_input');
+            await this.services.adminUi.show(ctx, [mode === 'edit' ? '✏️ Редагування шаблону' : '➕ Новий шаблон', '', 'Надішліть виправлені дані ще раз. Попередньо введені дані збережено.'].join('\n'), createFlowCancelKeyboard(mode === 'edit' ? AdminCallbacks.CancelEditTemplate : AdminCallbacks.CancelCreateTemplate));
+            return;
+        }
+
+        if (
+            callback.startsWith(
+                AdminCallbacks.TemplateChatPrefix,
+            )
+        ) {
+            await this.selectChat(
+                ctx,
+                adminId,
+                callback,
+            );
             return;
         }
 
@@ -217,22 +268,45 @@ export class TemplateFlowHandler {
             return;
         }
 
+        const data =
+            this.services.adminFlow.getData(
+                adminId,
+            );
+
+        const pendingWithCurrentChat: PendingTemplate = {
+            ...pendingTemplate,
+            chatId:
+                mode === 'edit'
+                    ? data.templateChatId
+                    : undefined,
+        };
+
         this.services.adminFlow.setData(
             adminId,
             {
-                pendingTemplate,
+                pendingTemplate:
+                    pendingWithCurrentChat,
             },
         );
 
-        await this.services.adminUi.show(
-            ctx,
-            this.renderPreview(
-                pendingTemplate,
-            ),
-            createTemplatePreviewKeyboard(
+        if (
+            mode === 'edit' &&
+            await this.getEnabledChat(
+                pendingWithCurrentChat.chatId,
+            )
+        ) {
+            await this.showPreview(
+                ctx,
+                adminId,
+                pendingWithCurrentChat,
+            );
+        } else {
+            await this.showChatSelection(
+                ctx,
+                adminId,
                 mode,
-            ),
-        );
+            );
+        }
     }
 
     private async startCreate(
@@ -256,6 +330,7 @@ export class TemplateFlowHandler {
                 'Пт 18:00-20:00',
                 '20',
                 '8',
+                '1',
                 '12:00',
                 '',
                 'Формат:',
@@ -263,12 +338,11 @@ export class TemplateFlowHandler {
                 '2. Один або кілька рядків: день і час тренування',
                 '3. Кількість місць',
                 '4. Мінімум гравців',
-                '5. Час публікації',
-                '',
-                'Публікація буде за день до кожного тренування.',
+                '5. За скільки днів публікувати',
+                '6. Час публікації',
             ].join('\n'),
             createFlowCancelKeyboard(
-                AdminCallbacks.Schedule,
+                AdminCallbacks.CancelCreateTemplate,
             ),
         );
     }
@@ -300,6 +374,8 @@ export class TemplateFlowHandler {
             'waiting_template_edit_input',
             {
                 templateId,
+                templateChatId:
+                    template.chatId,
             },
         );
 
@@ -323,10 +399,13 @@ export class TemplateFlowHandler {
                 String(
                     template.minPlayers,
                 ),
+                String(
+                    template.publishDaysBefore,
+                ),
                 template.publishTime,
             ].join('\n'),
             createFlowCancelKeyboard(
-                `${AdminCallbacks.TemplatePrefix}${template.id}`,
+                AdminCallbacks.CancelEditTemplate,
             ),
         );
     }
@@ -341,10 +420,6 @@ export class TemplateFlowHandler {
             );
 
         if (!data.pendingTemplate) {
-            this.services.adminFlow.finish(
-                adminId,
-            );
-
             await this.services.adminUi.replaceWithError(
                 ctx,
                 'Дані шаблону не знайдені. Почніть створення ще раз.',
@@ -354,31 +429,47 @@ export class TemplateFlowHandler {
             return;
         }
 
-        const settings =
-            await this.services.repositories.settings.get();
+        const chatId =
+            data.pendingTemplate.chatId;
 
-        if (!settings.chatId) {
+        if (chatId === undefined) {
             await this.services.adminUi.replaceWithError(
                 ctx,
-                'Спочатку потрібно налаштувати груповий чат клубу.',
-                this.createBackToScheduleKeyboard(),
+                'Оберіть чат для шаблону.',
+                createTemplatePreviewKeyboard('create'),
             );
 
             return;
         }
 
-        const template =
-            await this.templateScheduler.create({
+        if (!await this.getEnabledChat(chatId)) {
+            await this.showChatSelection(
+                ctx,
+                adminId,
+                'create',
+            );
+            return;
+        }
+
+        const settings =
+            await this.services.repositories.settings.get();
+
+        let template;
+        try {
+            template = await this.templateScheduler.create({
                 clubId:
                 settings.clubId,
 
-                chatId:
-                settings.chatId,
-
                 ...data.pendingTemplate,
+
+                chatId,
 
                 enabled: true,
             });
+        } catch (error) {
+            await this.services.adminUi.replaceWithError(ctx, `${error instanceof Error ? error.message : 'Не вдалося створити шаблон.'}\n\nВиправте дані або виберіть інший чат.`, createTemplatePreviewKeyboard('create'));
+            return;
+        }
 
         this.services.adminFlow.finish(
             adminId,
@@ -386,9 +477,7 @@ export class TemplateFlowHandler {
 
         await this.services.adminUi.replaceWithSuccess(
             ctx,
-            renderTemplateCard(
-                template,
-            ),
+            `Шаблон створено.\n\n${renderTemplateCard(template)}`,
             createTemplateKeyboard(
                 template,
             ),
@@ -408,10 +497,6 @@ export class TemplateFlowHandler {
             !data.templateId ||
             !data.pendingTemplate
         ) {
-            this.services.adminFlow.finish(
-                adminId,
-            );
-
             await this.services.adminUi.replaceWithError(
                 ctx,
                 'Дані для редагування не знайдені. Відкрийте шаблон і спробуйте ще раз.',
@@ -421,11 +506,40 @@ export class TemplateFlowHandler {
             return;
         }
 
-        const template =
-            await this.templateScheduler.update(
-                data.templateId,
-                data.pendingTemplate,
+        const chatId =
+            data.pendingTemplate.chatId;
+
+        if (chatId === undefined) {
+            await this.services.adminUi.replaceWithError(
+                ctx,
+                'Оберіть чат для шаблону.',
+                createTemplatePreviewKeyboard('edit'),
             );
+            return;
+        }
+
+        if (!await this.getEnabledChat(chatId)) {
+            await this.showChatSelection(
+                ctx,
+                adminId,
+                'edit',
+            );
+            return;
+        }
+
+        let template;
+        try {
+            template = await this.templateScheduler.update(
+                data.templateId,
+                {
+                    ...data.pendingTemplate,
+                    chatId,
+                },
+            );
+        } catch (error) {
+            await this.services.adminUi.replaceWithError(ctx, `${error instanceof Error ? error.message : 'Не вдалося оновити шаблон.'}\n\nВиправте дані або виберіть інший чат.`, createTemplatePreviewKeyboard('edit'));
+            return;
+        }
 
         this.services.adminFlow.finish(
             adminId,
@@ -433,22 +547,233 @@ export class TemplateFlowHandler {
 
         await this.services.adminUi.replaceWithSuccess(
             ctx,
-            renderTemplateCard(
-                template,
-            ),
+            `Зміни шаблону збережено.\n\n${renderTemplateCard(template)}`,
             createTemplateKeyboard(
                 template,
             ),
         );
     }
 
+    private async showChatSelection(
+        ctx: Context,
+        adminId: number,
+        mode: TemplateFlowMode,
+    ): Promise<void> {
+        const chats =
+            await this.services.chats.getEnabled();
+
+        if (!chats.length) {
+            await this.services.adminUi.replaceWithError(
+                ctx,
+                [
+                    'Немає жодного увімкненого чату.',
+                    '',
+                    'Додайте або увімкніть чат у розділі «💬 Чати», потім поверніться до цього шаблону.',
+                ].join('\n'),
+                createNoTemplateChatsKeyboard(
+                    mode,
+                ),
+            );
+            return;
+        }
+
+        this.services.adminFlow.transition(
+            adminId,
+            'waiting_template_chat_selection',
+        );
+
+        await this.services.adminUi.show(
+            ctx,
+            '💬 Оберіть чат для публікації тренувань:',
+            createTemplateChatSelectionKeyboard(
+                chats,
+                mode,
+            ),
+        );
+    }
+
+    private async selectChat(
+        ctx: Context,
+        adminId: number,
+        callback: string,
+    ): Promise<void> {
+        const data =
+            this.services.adminFlow.getData(
+                adminId,
+            );
+
+        const chatId = Number(
+            callback.slice(
+                AdminCallbacks.TemplateChatPrefix.length,
+            ),
+        );
+
+        const chats =
+            await this.services.chats.getEnabled();
+
+        const chat = chats.find(
+            item => item.id === chatId,
+        );
+
+        if (!data.pendingTemplate || !chat) {
+            await this.services.adminUi.replaceWithError(
+                ctx,
+                'Цей чат більше недоступний. Оберіть інший увімкнений чат.',
+                chats.length
+                    ? createTemplateChatSelectionKeyboard(
+                        chats,
+                        this.getMode(adminId),
+                    )
+                    : createNoTemplateChatsKeyboard(
+                        this.getMode(adminId),
+                    ),
+            );
+            return;
+        }
+
+        const pendingTemplate: PendingTemplate = {
+            ...data.pendingTemplate,
+            chatId,
+        };
+
+        this.services.adminFlow.setData(
+            adminId,
+            {
+                pendingTemplate,
+            },
+        );
+
+        await this.showPreview(
+            ctx,
+            adminId,
+            pendingTemplate,
+        );
+    }
+
+    private async showPreview(
+        ctx: Context,
+        adminId: number,
+        pendingTemplate: PendingTemplate,
+    ): Promise<void> {
+        const chat = await this.getEnabledChat(
+            pendingTemplate.chatId,
+        );
+
+        if (!chat) {
+            await this.showChatSelection(
+                ctx,
+                adminId,
+                this.getMode(adminId),
+            );
+            return;
+        }
+
+        await this.services.adminUi.show(
+            ctx,
+            [
+                this.renderPreview(pendingTemplate),
+                '',
+                `💬 Чат: ${chat.name}`,
+            ].join('\n'),
+            createTemplatePreviewKeyboard(
+                this.getMode(adminId),
+            ),
+        );
+    }
+
+    private async backFromChatSelection(
+        ctx: Context,
+        adminId: number,
+    ): Promise<void> {
+        const data =
+            this.services.adminFlow.getData(adminId);
+        const mode = this.getMode(adminId);
+
+        if (
+            data.pendingTemplate?.chatId !== undefined &&
+            await this.getEnabledChat(
+                data.pendingTemplate.chatId,
+            )
+        ) {
+            await this.showPreview(
+                ctx,
+                adminId,
+                data.pendingTemplate,
+            );
+            return;
+        }
+
+        this.services.adminFlow.transition(
+            adminId,
+            mode === 'edit'
+                ? 'waiting_template_edit_input'
+                : 'waiting_template_quick_input',
+        );
+
+        await this.services.adminUi.show(
+            ctx,
+            mode === 'edit'
+                ? '✏️ Надішліть оновлені дані шаблону ще раз.'
+                : '➕ Надішліть дані нового шаблону ще раз.',
+            createFlowCancelKeyboard(
+                mode === 'edit'
+                    ? AdminCallbacks.CancelEditTemplate
+                    : AdminCallbacks.CancelCreateTemplate,
+            ),
+        );
+    }
+
+    private async getEnabledChat(
+        chatId: number | undefined,
+    ) {
+        if (chatId === undefined) {
+            return undefined;
+        }
+
+        const chat =
+            await this.services.chats.getById(chatId);
+
+        return chat?.enabled
+            ? chat
+            : undefined;
+    }
+
+    private getMode(
+        adminId: number,
+    ): TemplateFlowMode {
+        return this.services.adminFlow.getData(
+            adminId,
+        ).templateId
+            ? 'edit'
+            : 'create';
+    }
+
     private async cancel(
         ctx: Context,
         adminId: number,
     ): Promise<void> {
+        const data =
+            this.services.adminFlow.getData(
+                adminId,
+            );
+
         this.services.adminFlow.finish(
             adminId,
         );
+
+        if (data.templateId) {
+            const template =
+                await this.services.templates.getRequired(
+                    data.templateId,
+                );
+
+            await this.services.adminUi.show(
+                ctx,
+                renderTemplateCard(template),
+                createTemplateKeyboard(template),
+            );
+            return;
+        }
 
         await this.services.adminUi.show(
             ctx,
@@ -472,10 +797,9 @@ export class TemplateFlowHandler {
             );
 
         const backCallback =
-            mode === 'edit' &&
-            data.templateId
-                ? `${AdminCallbacks.TemplatePrefix}${data.templateId}`
-                : AdminCallbacks.Schedule;
+            mode === 'edit'
+                ? AdminCallbacks.CancelEditTemplate
+                : AdminCallbacks.CancelCreateTemplate;
 
         await this.services.adminUi.replaceWithError(
             ctx,
@@ -489,9 +813,10 @@ export class TemplateFlowHandler {
                 'Пт 18:00-20:00',
                 '20',
                 '8',
+                '1',
                 '12:00',
                 '',
-                'Публікація буде за день до кожного тренування.',
+                'Останні два рядки: днів до публікації та час.',
             ].join('\n'),
             createFlowCancelKeyboard(
                 backCallback,
@@ -540,7 +865,7 @@ export class TemplateFlowHandler {
         }
 
         if (
-            dataLines.length < 4
+            dataLines.length < 5
         ) {
             return undefined;
         }
@@ -555,21 +880,23 @@ export class TemplateFlowHandler {
         const minPlayers =
             Number(
                 dataLines[
-                dataLines.length - 2
+                dataLines.length - 3
                     ],
             );
+
+        const publishDaysBefore = Number(dataLines[dataLines.length - 2]);
 
         const placesLimit =
             Number(
                 dataLines[
-                dataLines.length - 3
+                dataLines.length - 4
                     ],
             );
 
         const slotLines =
             dataLines.slice(
                 0,
-                -3,
+                -4,
             );
 
         if (
@@ -586,13 +913,15 @@ export class TemplateFlowHandler {
             minPlayers < 0 ||
             minPlayers >
             placesLimit ||
+            !Number.isInteger(publishDaysBefore) ||
+            publishDaysBefore < 0 ||
             slotLines.length === 0
         ) {
             return undefined;
         }
 
         const slots:
-            CreateTrainingTemplateSlotInput[] =
+            UpdateTrainingTemplateSlotInput[] =
             [];
 
         for (
@@ -638,7 +967,7 @@ export class TemplateFlowHandler {
                 minPlayers,
 
                 publishDaysBefore:
-                    1,
+                    publishDaysBefore,
 
                 publishTime,
 
@@ -661,7 +990,7 @@ export class TemplateFlowHandler {
             minPlayers,
 
             publishDaysBefore:
-                1,
+                publishDaysBefore,
 
             publishTime,
 
@@ -824,7 +1153,7 @@ export class TemplateFlowHandler {
             `👥 Місць: ${template.placesLimit}`,
             `🔻 Мінімум: ${template.minPlayers}`,
             '',
-            '📣 Публікація за день до кожного тренування',
+            `📣 Публікація за ${template.publishDaysBefore} дн. до тренування`,
             `🕐 ${template.publishTime}`,
         ].join('\n');
     }

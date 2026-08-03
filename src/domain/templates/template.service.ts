@@ -6,6 +6,7 @@ import {
     TrainingTemplate,
     TrainingTemplateSlot,
 } from './template.types';
+import { logger } from '../../utils/logger';
 
 export type CreateTemplateInput = {
     clubId: string;
@@ -19,6 +20,7 @@ export type CreateTemplateInput = {
 
     publishDaysBefore: number;
     publishTime: string;
+    cancelCheckHoursBefore?: number;
 
     slots: CreateTrainingTemplateSlotInput[];
 
@@ -35,6 +37,7 @@ export type UpdateTemplateInput = {
 
     publishDaysBefore?: number;
     publishTime?: string;
+    cancelCheckHoursBefore?: number;
 
     slots?: Array<
         TrainingTemplateSlot |
@@ -86,6 +89,7 @@ export class TemplateService {
             publishDaysBefore:
             input.publishDaysBefore,
             publishTime: input.publishTime,
+            cancelCheckHoursBefore: input.cancelCheckHoursBefore ?? 4,
 
             slots: input.slots.map(
                 slot => ({
@@ -103,9 +107,9 @@ export class TemplateService {
             updatedAt: now,
         };
 
-        return this.repositories.templates.save(
-            template,
-        );
+        const saved = await this.repositories.templates.save(template);
+        logger.info('template.created', { templateId: saved.id, chatId: saved.chatId, slotCount: saved.slots.length, enabled: saved.enabled });
+        return saved;
     }
 
     async update(
@@ -133,9 +137,19 @@ export class TemplateService {
             input.publishTime ??
             template.publishTime;
 
+        const cancelCheckHoursBefore = input.cancelCheckHoursBefore ?? template.cancelCheckHoursBefore ?? 4;
+
+        if (!Number.isInteger(cancelCheckHoursBefore) || cancelCheckHoursBefore < 0) {
+            throw new Error('Час перевірки мінімуму не може бути відʼємним');
+        }
+
         const slots =
             input.slots ??
             template.slots;
+
+        const existingSlots = [
+            ...template.slots,
+        ];
 
         this.validateCommonFields({
             placesLimit,
@@ -156,6 +170,7 @@ export class TemplateService {
             template,
             input,
         );
+        template.cancelCheckHoursBefore = cancelCheckHoursBefore;
 
         template.title =
             template.title.trim();
@@ -164,27 +179,62 @@ export class TemplateService {
             template.location?.trim() ||
             undefined;
 
+        const usedSlotIds =
+            new Set<string>();
+
         template.slots = slots.map(
-            slot => ({
+            (slot, index) => {
+                const suppliedId =
+                    'id' in slot
+                        ? slot.id
+                        : undefined;
+
+                const matchingSlot =
+                    existingSlots.find(
+                        existing =>
+                            !usedSlotIds.has(existing.id) &&
+                            existing.dayOfWeek === slot.dayOfWeek &&
+                            existing.startTime === slot.startTime &&
+                            existing.endTime === slot.endTime,
+                    ) ??
+                    (
+                        existingSlots[index] &&
+                        !usedSlotIds.has(
+                            existingSlots[index].id,
+                        )
+                            ? existingSlots[index]
+                            : undefined
+                    );
+
+                const id =
+                    (
+                        suppliedId &&
+                        !usedSlotIds.has(suppliedId)
+                            ? suppliedId
+                            : undefined
+                    ) ||
+                    matchingSlot?.id ||
+                    createId('slot');
+
+                usedSlotIds.add(id);
+
+                return {
                 ...slot,
 
-                id:
-                    'id' in slot &&
-                    slot.id
-                        ? slot.id
-                        : createId('slot'),
+                id,
 
                 enabled:
                     slot.enabled ?? true,
-            }),
+                };
+            },
         );
 
         template.updatedAt =
             nowIso();
 
-        return this.repositories.templates.save(
-            template,
-        );
+        const saved = await this.repositories.templates.save(template);
+        logger.info('template.updated', { templateId: saved.id, changedFields: Object.keys(input), slotCount: saved.slots.length, enabled: saved.enabled });
+        return saved;
     }
 
     async enable(
@@ -240,6 +290,7 @@ export class TemplateService {
         await this.repositories.templates.delete(
             templateId,
         );
+        logger.info('template.deleted', { templateId });
     }
 
     private validateCommonFields(

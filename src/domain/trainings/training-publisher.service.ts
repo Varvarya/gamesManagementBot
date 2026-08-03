@@ -4,6 +4,8 @@ import { TrainingTemplate } from '../templates/template.types';
 import { TrainingMessageRenderer } from './training-message.renderer';
 import { TrainingService } from './training.service';
 import { Training } from './training.types';
+import { logger } from '../../utils/logger';
+import { isTelegramMessageNotModified, isTelegramMessageUnavailable } from '../../utils/telegramEditErrors';
 
 type PublishManualTrainingInput = {
     clubId: string;
@@ -18,6 +20,7 @@ type PublishManualTrainingInput = {
 
     placesLimit: number;
     minPlayers: number;
+    cancelCheckHoursBefore?: number;
 };
 
 export type PublishTemplateSlotInput = {
@@ -37,9 +40,17 @@ export type PublishTemplateSlotInput = {
 
     placesLimit: number;
     minPlayers: number;
+    cancelCheckHoursBefore?: number;
 };
 
 export class TrainingPublisherService {
+    private readonly templatePublications =
+        new Map<string, Promise<Training>>();
+    private readonly renderedMessages = new Map<string, string>();
+    private readonly refreshes = new Map<string, {
+        requested: boolean;
+        promise: Promise<boolean>;
+    }>();
     constructor(
         private readonly telegram: Telegram,
         private readonly repositories: RepositoriesContext,
@@ -55,16 +66,45 @@ export class TrainingPublisherService {
         return this.publishDraft(training);
     }
 
-    async refreshMessage(trainingId: string): Promise<void> {
+    async refreshMessage(trainingId: string): Promise<boolean> {
+        const current = this.refreshes.get(trainingId);
+        if (current) {
+            current.requested = true;
+            return current.promise;
+        }
+
+        const state = { requested: false, promise: Promise.resolve(false) };
+        state.promise = this.runRefreshLoop(trainingId, state);
+        this.refreshes.set(trainingId, state);
+        try {
+            return await state.promise;
+        } finally {
+            if (this.refreshes.get(trainingId) === state) this.refreshes.delete(trainingId);
+        }
+    }
+
+    private async runRefreshLoop(
+        trainingId: string,
+        state: { requested: boolean },
+    ): Promise<boolean> {
+        let edited = false;
+        do {
+            state.requested = false;
+            edited = await this.refreshMessageOnce(trainingId) || edited;
+        } while (state.requested);
+        return edited;
+    }
+
+    private async refreshMessageOnce(trainingId: string): Promise<boolean> {
         const training = await this.trainings.getRequired(trainingId);
 
         if (!training.messageId) {
-            throw new Error(
-                `Training ${training.id} has not been published`,
-            );
+            logger.warn('publication.message_missing', { trainingId: training.id });
+            return false;
         }
 
         const text = await this.render(training);
+        if (this.renderedMessages.get(training.id) === text) return false;
 
         try {
             await this.telegram.editMessageText(
@@ -73,12 +113,21 @@ export class TrainingPublisherService {
                 undefined,
                 text,
             );
+            this.renderedMessages.set(training.id, text);
+            logger.info('publication.message_updated', { trainingId: training.id, chatId: training.chatId, messageId: training.messageId });
+            return true;
         } catch (error) {
-            if (this.isMessageNotModifiedError(error)) {
-                return;
+            if (isTelegramMessageNotModified(error)) {
+                this.renderedMessages.set(training.id, text);
+                return false;
+            }
+            if (isTelegramMessageUnavailable(error)) {
+                logger.warn('publication.message_unavailable', { trainingId: training.id, chatId: training.chatId, messageId: training.messageId });
+                return false;
             }
 
-            throw error;
+            logger.error('publication.message_update_failed', { trainingId: training.id, chatId: training.chatId, messageId: training.messageId, error });
+            return false;
         }
     }
 
@@ -96,16 +145,46 @@ export class TrainingPublisherService {
             status: 'open',
         });
 
-        const message = await this.telegram.sendMessage(
-            training.chatId,
-            text,
-        );
+        let message: Awaited<ReturnType<Telegram['sendMessage']>>;
 
-        const published =
-            await this.trainings.publish({
+        try {
+            message = await this.telegram.sendMessage(
+                training.chatId,
+                text,
+            );
+        } catch (error) {
+            logger.error('publication.send_failed', { trainingId: training.id, chatId: training.chatId, error });
+            throw new Error(
+                `Failed to publish training ${training.id} to chat ${training.chatId}`,
+                { cause: error },
+            );
+        }
+
+        let published: Training;
+
+        try {
+            published = await this.trainings.publish({
                 trainingId: training.id,
                 messageId: message.message_id,
             });
+        } catch (error) {
+            try {
+                await this.telegram.deleteMessage(
+                    training.chatId,
+                    message.message_id,
+                );
+            } catch (rollbackError) {
+                logger.error('publication.rollback_failed', { trainingId: training.id, chatId: training.chatId, messageId: message.message_id, error: rollbackError });
+            }
+
+            throw new Error(
+                `Failed to persist Telegram publication for training ${training.id}`,
+                { cause: error },
+            );
+        }
+
+        this.renderedMessages.set(published.id, text);
+        logger.info('publication.published', { trainingId: published.id, chatId: published.chatId, messageId: published.messageId, templateId: published.templateId, slotId: published.templateSlotId });
 
         if (this.onPublished) {
             await this.onPublished(published);
@@ -121,16 +200,6 @@ export class TrainingPublisherService {
             training,
             players,
         });
-    }
-
-    private isMessageNotModifiedError(error: unknown): boolean {
-        if (!(error instanceof Error)) {
-            return false;
-        }
-
-        return error.message.includes(
-            'message is not modified',
-        );
     }
 
     async refreshMessagesForPlayer(
@@ -160,6 +229,15 @@ export class TrainingPublisherService {
         }
     }
 
+    async notifyCancellation(trainingId: string): Promise<void> {
+        const training = await this.trainings.getRequired(trainingId);
+        try {
+            await this.telegram.sendMessage(training.chatId, `❌ ${training.title} ${training.date} о ${training.startTime} скасовано: недостатньо зареєстрованих гравців.`);
+        } catch (error) {
+            logger.error('publication.cancellation_notification_failed', { trainingId: training.id, chatId: training.chatId, error });
+        }
+    }
+
     private onPublished?: (
         training: Training,
     ) => Promise<void>;
@@ -173,6 +251,37 @@ export class TrainingPublisherService {
     }
 
     async publishTemplateSlot(
+        input: PublishTemplateSlotInput,
+    ): Promise<Training> {
+        const key = [
+            input.templateId,
+            input.slotId,
+            input.date,
+        ].join(':');
+
+        const inFlight =
+            this.templatePublications.get(key);
+
+        if (inFlight) {
+            return inFlight;
+        }
+
+        const publication =
+            this.publishTemplateSlotOnce(input);
+
+        this.templatePublications.set(
+            key,
+            publication,
+        );
+
+        try {
+            return await publication;
+        } finally {
+            this.templatePublications.delete(key);
+        }
+    }
+
+    private async publishTemplateSlotOnce(
         input: PublishTemplateSlotInput,
     ): Promise<Training> {
         const existing =
@@ -194,6 +303,7 @@ export class TrainingPublisherService {
          * - повторного спрацювання job.
          */
         if (existing) {
+            logger.info('publication.duplicate_skipped', { trainingId: existing.id, templateId: input.templateId, slotId: input.slotId, date: input.date });
             return existing;
         }
 
@@ -230,6 +340,8 @@ export class TrainingPublisherService {
 
                 minPlayers:
                 input.minPlayers,
+
+                cancelCheckHoursBefore: input.cancelCheckHoursBefore,
             });
 
         return this.publishDraft(

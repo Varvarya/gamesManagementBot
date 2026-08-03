@@ -1,4 +1,5 @@
 import { Player } from '../../../domain/players/player.types';
+import { ChatConfig } from '../../../domain/chats/chat.types';
 import { TrainingTemplate } from '../../../domain/templates/template.types';
 import { Training } from '../../../domain/trainings/training.types';
 
@@ -21,6 +22,17 @@ const SHORT_DAY_NAMES: Record<number, string> = {
     6: 'Сб',
     7: 'Нд',
 };
+
+export function renderChatCard(
+    chat: ChatConfig,
+): string {
+    return [
+        `${chat.enabled ? '🟢' : '⚪️'} ${chat.name}`,
+        '',
+        `Telegram ID: ${chat.id}`,
+        `Статус: ${chat.enabled ? 'увімкнено' : 'вимкнено'}`,
+    ].join('\n');
+}
 
 export function formatDay(
     dayOfWeek: number,
@@ -108,6 +120,12 @@ export function getTrainingStatus(
                 title: 'Завершено',
             };
 
+        case 'archived':
+            return {
+                icon: '📦',
+                title: 'В архіві',
+            };
+
         case 'draft':
             return {
                 icon: '⚪️',
@@ -118,6 +136,7 @@ export function getTrainingStatus(
 
 export function renderTrainingCard(
     training: Training,
+    options: { playerNames?: ReadonlyMap<string, string>; chatName?: string; showAll?: boolean } = {},
 ): string {
     const status = getTrainingStatus(training);
     const registered = countTrainingPlaces(training);
@@ -126,6 +145,10 @@ export function renderTrainingCard(
         training.placesLimit - registered,
         0,
     );
+    const participantLimit = options.showAll ? training.participants.length : 10;
+    const waitlistLimit = options.showAll ? training.waitlist.length : 5;
+    const participantLines = renderParticipantNames(training.participants, options.playerNames, participantLimit);
+    const waitlistLines = renderParticipantNames(training.waitlist, options.playerNames, waitlistLimit);
 
     return [
         `${status.icon} ${training.title}`,
@@ -138,21 +161,36 @@ export function renderTrainingCard(
         training.location
             ? `📍 ${training.location}`
             : undefined,
+        `💬 ${options.chatName ?? training.chatId}`,
         '',
-        `👥 Записано: ${registered}/${training.placesLimit}`,
+        `👥 Учасники (${registered}/${training.placesLimit})`,
+        ...participantLines,
+        '',
+        `🟡 Черга (${waiting})`,
+        ...waitlistLines,
+        '',
         `🪑 Вільно: ${free}`,
-        waiting > 0
-            ? `⏳ Очікують: ${waiting}`
-            : undefined,
         `🔻 Мінімум: ${training.minPlayers}`,
         '',
-        `Статус: ${status.title}`,
+        `Статус: ${status.icon} ${status.title}`,
     ]
         .filter(
             (line): line is string =>
                 line !== undefined,
         )
         .join('\n');
+}
+
+export function isTrainingParticipantListTruncated(training: Training): boolean {
+    return training.participants.length > 10 || training.waitlist.length > 5;
+}
+
+function renderParticipantNames(entries: Training['participants'], names: ReadonlyMap<string, string> | undefined, limit: number): string[] {
+    if (entries.length === 0) return ['—'];
+    const visible = entries.slice(0, limit).map((entry, index) => `${index + 1}. ${names?.get(entry.playerId) ?? entry.displayName ?? 'Гравець'}`);
+    const hidden = entries.length - visible.length;
+    if (hidden > 0) visible.push(`… ще ${hidden}`);
+    return visible;
 }
 
 export function renderTemplateCard(
@@ -218,27 +256,22 @@ export function renderTemplateCard(
 
 export function renderPlayerCard(
     player: Player,
+    options: { currentTrainings?: Training[]; registrationHistory?: Training[] } = {},
 ): string {
     return [
-        `${
-            player.isConfirmed
-                ? '✅'
-                : '⚠️'
-        } ${player.displayName}`,
+        `👤 ${player.displayName}`,
         '',
-        player.telegramName
-            ? `Telegram: ${player.telegramName}`
-            : undefined,
-        player.username
-            ? `Username: @${player.username}`
-            : undefined,
+        `Статус: ${player.isConfirmed ? '✅ Підтверджено' : '⚠️ Не підтверджено'}`,
+        `Активність: ${player.isActive ? '🟢 Активна' : '⛔ Неактивна'}`,
+        `Telegram: ${player.username ? `@${player.username}` : player.telegramName ?? '—'}`,
         '',
-        player.isConfirmed
-            ? 'Імʼя підтверджено'
-            : 'Потрібно підтвердити імʼя',
-        player.isActive
-            ? '🟢 Активний гравець'
-            : '⚪️ Неактивний гравець',
+        'Aliases:',
+        ...(player.aliases.length ? player.aliases.map((alias) => `- ${alias}`) : ['—']),
+        '',
+        'Поточні тренування:',
+        ...(options.currentTrainings?.length ? options.currentTrainings.slice(0, 5).map((training) => `- ${formatDate(training.date)}, ${training.startTime} · ${training.title}`) : ['—']),
+        '',
+        `Історія реєстрацій: ${options.registrationHistory?.length ?? 0}`,
     ]
         .filter(
             (line): line is string =>

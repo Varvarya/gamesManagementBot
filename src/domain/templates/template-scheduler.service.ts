@@ -1,302 +1,265 @@
-import { TrainingPublisherService } from '../trainings/training-publisher.service';
 import { SchedulerService } from '../../scheduler/scheduler.service';
+import { SettingsRepository } from '../../storage/repositories/settings.repository';
+import { ChatService } from '../chats/chat.service';
+import { TrainingPublisherService } from '../trainings/training-publisher.service';
 import { TemplateService } from './template.service';
 import {
     TrainingTemplate,
     TrainingTemplateSlot,
 } from './template.types';
-import {
-    resolveTemplateSlot,
-} from './template.utils';
+import { resolveTemplateSlot } from './template.utils';
+import { logger } from '../../utils/logger';
 
 type CreateTemplateInput =
     Parameters<TemplateService['create']>[0];
-
 type UpdateTemplateInput =
     Parameters<TemplateService['update']>[1];
+
+type ZonedNow = {
+    date: string;
+    time: string;
+};
 
 export class TemplateSchedulerService {
     constructor(
         private readonly templates: TemplateService,
         private readonly scheduler: SchedulerService,
         private readonly publisher: TrainingPublisherService,
+        private readonly chats: ChatService,
+        private readonly settings: SettingsRepository,
+        private readonly now: () => Date = () => new Date(),
     ) {}
 
-    async create(
-        input: CreateTemplateInput,
-    ): Promise<TrainingTemplate> {
-        const template =
-            await this.templates.create(input);
-
-        this.syncTemplate(template);
-
+    async create(input: CreateTemplateInput): Promise<TrainingTemplate> {
+        const template = await this.templates.create(input);
+        await this.syncTemplate(template);
         return template;
     }
 
-    async update(
-        templateId: string,
-        input: UpdateTemplateInput,
-    ): Promise<TrainingTemplate> {
-        const template =
-            await this.templates.update(
-                templateId,
-                input,
-            );
-
-        this.syncTemplate(template);
-
+    async update(templateId: string, input: UpdateTemplateInput): Promise<TrainingTemplate> {
+        const template = await this.templates.update(templateId, input);
+        await this.syncTemplate(template);
         return template;
     }
 
-    async enable(
-        templateId: string,
-    ): Promise<TrainingTemplate> {
-        const template =
-            await this.templates.enable(
-                templateId,
-            );
-
-        this.syncTemplate(template);
-
+    async enable(templateId: string): Promise<TrainingTemplate> {
+        const template = await this.templates.enable(templateId);
+        await this.syncTemplate(template);
         return template;
     }
 
-    async disable(
-        templateId: string,
-    ): Promise<TrainingTemplate> {
-        const template =
-            await this.templates.disable(
-                templateId,
-            );
-
-        this.scheduler.cancelTemplate(
-            template.id,
-        );
-
+    async disable(templateId: string): Promise<TrainingTemplate> {
+        const template = await this.templates.disable(templateId);
+        this.cancelTemplateJobs(template.id);
         return template;
     }
 
-    async delete(
-        templateId: string,
-    ): Promise<void> {
-        this.scheduler.cancelTemplate(
-            templateId,
-        );
-
-        await this.templates.delete(
-            templateId,
-        );
+    async delete(templateId: string): Promise<void> {
+        this.cancelTemplateJobs(templateId);
+        await this.templates.delete(templateId);
     }
 
-    /**
-     * Відновлення scheduler після запуску застосунку.
-     *
-     * Шаблони передає ApplicationContext,
-     * тому TemplateService не потребує listEnabled().
-     */
-    restore(
-        templates: TrainingTemplate[],
-    ): void {
+    async restore(templates: TrainingTemplate[]): Promise<number> {
+        this.scheduler.cancelByPrefix('template:');
+
         for (const template of templates) {
-            this.syncTemplate(template);
+            await this.syncTemplate(template, true);
         }
+
+        return this.scheduler.getScheduledTemplateIds()
+            .filter(id => id.startsWith('template:'))
+            .length;
     }
 
-    syncTemplate(
+    async syncTemplate(
         template: TrainingTemplate,
-    ): void {
-        this.scheduler.cancelTemplate(
-            template.id,
-        );
+        publishMissed = false,
+    ): Promise<void> {
+        this.cancelTemplateJobs(template.id);
 
-        if (!template.enabled) {
-            return;
+        if (!template.enabled) return;
+        if (!template.slots.length) {
+            throw new Error(`Template ${template.id} has no slots`);
         }
+
+        const { timezone } = await this.settings.get();
 
         for (const slot of template.slots) {
-            if (!slot.enabled) {
-                continue;
-            }
+            if (!slot.enabled) continue;
+            this.scheduleSlot(template, slot, timezone);
 
-            this.scheduleSlot(
-                template,
-                slot,
-            );
+            if (publishMissed) {
+                try {
+                    await this.publishMissedIfRelevant(
+                        template,
+                        slot,
+                        timezone,
+                    );
+                } catch (error) {
+                    logger.error('scheduler.missed_publication_failed', { jobId: this.getSlotJobId(template.id, slot.id), templateId: template.id, slotId: slot.id, error });
+                }
+            }
         }
     }
 
     private scheduleSlot(
         template: TrainingTemplate,
         slot: TrainingTemplateSlot,
+        timezone: string,
     ): void {
-        const resolvedSlot =
-            resolveTemplateSlot(
-                template,
-                slot,
-            );
-
-        const schedulerTemplate = {
-            id: this.getSlotJobId(
-                template.id,
-                slot.id,
-            ),
-
-            dayOfWeek:
-                this.calculatePublishDayOfWeek(
-                    resolvedSlot.dayOfWeek,
-                    resolvedSlot.publishDaysBefore,
-                ),
-
-            publishTime:
-            resolvedSlot.publishTime,
-        };
+        const resolved = resolveTemplateSlot(template, slot);
+        const jobId = this.getSlotJobId(template.id, slot.id);
 
         this.scheduler.rescheduleTemplate(
-            schedulerTemplate,
+            {
+                id: jobId,
+                dayOfWeek: calculatePublishDayOfWeek(
+                    resolved.dayOfWeek,
+                    resolved.publishDaysBefore,
+                ),
+                publishTime: resolved.publishTime,
+                timezone,
+            },
             async () => {
-                const currentTemplate =
-                    await this.templates.getRequired(
-                        template.id,
+                try {
+                    const currentTemplate =
+                        await this.templates.getRequired(template.id);
+                    const currentSlot = currentTemplate.slots.find(
+                        item => item.id === slot.id,
                     );
 
-                if (!currentTemplate.enabled) {
-                    this.scheduler.cancelTemplate(
-                        schedulerTemplate.id,
+                    if (!currentTemplate.enabled || !currentSlot?.enabled) {
+                        this.scheduler.cancelTemplate(jobId);
+                        return;
+                    }
+
+                    const currentResolved =
+                        resolveTemplateSlot(currentTemplate, currentSlot);
+                    const publicationDate = getZonedNow(this.now(), timezone).date;
+                    const trainingDate = addCalendarDays(
+                        publicationDate,
+                        currentResolved.publishDaysBefore,
                     );
 
-                    return;
+                    await this.publishSlot(currentTemplate, currentSlot, trainingDate);
+                } catch (error) {
+                    logger.error('scheduler.automatic_publication_failed', { jobId, templateId: template.id, slotId: slot.id, error });
                 }
-
-                const currentSlot =
-                    currentTemplate.slots.find(
-                        (item) =>
-                            item.id === slot.id,
-                    );
-
-                if (
-                    !currentSlot ||
-                    !currentSlot.enabled
-                ) {
-                    this.scheduler.cancelTemplate(
-                        schedulerTemplate.id,
-                    );
-
-                    return;
-                }
-
-                const currentResolvedSlot =
-                    resolveTemplateSlot(
-                        currentTemplate,
-                        currentSlot,
-                    );
-
-                const trainingDate =
-                    this.calculateTrainingDate(
-                        currentResolvedSlot.dayOfWeek,
-                    );
-
-                await this.publisher.publishTemplateSlot({
-                    templateId:
-                    currentTemplate.id,
-
-                    slotId:
-                    currentSlot.id,
-
-                    clubId:
-                    currentTemplate.clubId,
-
-                    chatId:
-                    currentTemplate.chatId,
-
-                    title:
-                    currentTemplate.title,
-
-                    location:
-                    currentTemplate.location,
-
-                    date:
-                    trainingDate,
-
-                    startTime:
-                    currentResolvedSlot.startTime,
-
-                    endTime:
-                    currentResolvedSlot.endTime,
-
-                    placesLimit:
-                    currentResolvedSlot.placesLimit,
-
-                    minPlayers:
-                    currentResolvedSlot.minPlayers,
-                });
             },
         );
     }
 
-    private calculatePublishDayOfWeek(
-        trainingDayOfWeek: number,
-        publishDaysBefore: number,
-    ): number {
-        const result =
-            (
-                trainingDayOfWeek -
-                publishDaysBefore -
-                1 +
-                7
-            ) % 7;
-
-        return result + 1;
-    }
-
-    private calculateTrainingDate(
-        targetDayOfWeek: number,
-    ): string {
-        const current = new Date();
-
-        const currentDay =
-            current.getDay() === 0
-                ? 7
-                : current.getDay();
-
-        let daysToAdd =
-            targetDayOfWeek -
-            currentDay;
-
-        if (daysToAdd < 0) {
-            daysToAdd += 7;
-        }
-
-        current.setDate(
-            current.getDate() +
-            daysToAdd,
+    private async publishMissedIfRelevant(
+        template: TrainingTemplate,
+        slot: TrainingTemplateSlot,
+        timezone: string,
+    ): Promise<void> {
+        const resolved = resolveTemplateSlot(template, slot);
+        const zonedNow = getZonedNow(this.now(), timezone);
+        const trainingDate = findNearestFutureTrainingDate(
+            zonedNow,
+            resolved.dayOfWeek,
+            resolved.startTime,
+        );
+        const publicationDate = addCalendarDays(
+            trainingDate,
+            -resolved.publishDaysBefore,
         );
 
-        return this.formatDate(current);
+        if (
+            publicationDate < zonedNow.date ||
+            (
+                publicationDate === zonedNow.date &&
+                resolved.publishTime <= zonedNow.time
+            )
+        ) {
+            await this.publishSlot(template, slot, trainingDate);
+        }
     }
 
-    private formatDate(
-        value: Date,
-    ): string {
-        const year =
-            value.getFullYear();
+    private async publishSlot(
+        template: TrainingTemplate,
+        slot: TrainingTemplateSlot,
+        trainingDate: string,
+    ): Promise<void> {
+        const chat = await this.chats.getById(template.chatId);
+        if (!chat?.enabled) {
+            throw new Error(
+                `Template ${template.id} chat ${template.chatId} is missing or disabled`,
+            );
+        }
 
-        const month =
-            String(
-                value.getMonth() + 1,
-            ).padStart(2, '0');
-
-        const day =
-            String(
-                value.getDate(),
-            ).padStart(2, '0');
-
-        return `${year}-${month}-${day}`;
+        const resolved = resolveTemplateSlot(template, slot);
+        await this.publisher.publishTemplateSlot({
+            templateId: template.id,
+            slotId: slot.id,
+            clubId: template.clubId,
+            chatId: template.chatId,
+            title: template.title,
+            location: template.location,
+            date: trainingDate,
+            startTime: resolved.startTime,
+            endTime: resolved.endTime,
+            placesLimit: resolved.placesLimit,
+            minPlayers: resolved.minPlayers,
+            cancelCheckHoursBefore: template.cancelCheckHoursBefore ?? 4,
+        });
     }
 
-    private getSlotJobId(
-        templateId: string,
-        slotId: string,
-    ): string {
+    private cancelTemplateJobs(templateId: string): void {
+        this.scheduler.cancelByPrefix(`template:${templateId}:slot:`);
+    }
+
+    private getSlotJobId(templateId: string, slotId: string): string {
         return `template:${templateId}:slot:${slotId}`;
     }
+}
+
+export function calculatePublishDayOfWeek(
+    trainingDayOfWeek: number,
+    publishDaysBefore: number,
+): number {
+    return ((trainingDayOfWeek - publishDaysBefore - 1) % 7 + 7) % 7 + 1;
+}
+
+export function addCalendarDays(date: string, days: number): string {
+    const value = new Date(`${date}T00:00:00.000Z`);
+    value.setUTCDate(value.getUTCDate() + days);
+    return value.toISOString().slice(0, 10);
+}
+
+export function findNearestFutureTrainingDate(
+    now: ZonedNow,
+    dayOfWeek: number,
+    startTime: string,
+): string {
+    for (let offset = 0; offset <= 7; offset += 1) {
+        const date = addCalendarDays(now.date, offset);
+        const weekday = new Date(`${date}T00:00:00.000Z`).getUTCDay() || 7;
+        if (
+            weekday === dayOfWeek &&
+            (offset > 0 || startTime > now.time)
+        ) {
+            return date;
+        }
+    }
+    return addCalendarDays(now.date, 7);
+}
+
+export function getZonedNow(value: Date, timezone: string): ZonedNow {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: timezone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+    }).formatToParts(value);
+    const get = (type: Intl.DateTimeFormatPartTypes) =>
+        parts.find(part => part.type === type)?.value ?? '';
+    return {
+        date: `${get('year')}-${get('month')}-${get('day')}`,
+        time: `${get('hour')}:${get('minute')}`,
+    };
 }

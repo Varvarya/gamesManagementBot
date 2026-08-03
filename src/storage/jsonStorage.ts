@@ -1,14 +1,14 @@
 import {
     mkdir,
-    readFile,
-    rename,
-    writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
+import { atomicWriteJson, backupBeforeMigration, readReliableJson } from './atomicWrite';
 
 export type JsonStorageOptions = {
     dataDir: string;
-    clubId: string;
+    storageSlug?: string;
+    /** @deprecated use storageSlug */
+    clubId?: string;
 };
 
 export class JsonStorage {
@@ -20,7 +20,7 @@ export class JsonStorage {
         this.directoryPath = path.resolve(
             options.dataDir,
             this.sanitizePathPart(
-                options.clubId,
+                options.storageSlug ?? options.clubId ?? 'club',
             ),
         );
     }
@@ -35,21 +35,12 @@ export class JsonStorage {
             );
 
         try {
-            const content =
-                await readFile(
-                    filePath,
-                    'utf8',
-                );
-
-            if (!content.trim()) {
-                return this.clone(
-                    fallback,
-                );
+            const loaded = await readReliableJson(filePath, (value): value is T => value !== undefined);
+            if (loaded.migrated) {
+                await backupBeforeMigration(filePath, loaded.schemaVersion);
+                await atomicWriteJson(filePath, loaded.data);
             }
-
-            return JSON.parse(
-                content,
-            ) as T;
+            return loaded.data;
         } catch (error) {
             if (
                 this.isNodeError(
@@ -62,17 +53,6 @@ export class JsonStorage {
                 );
             }
 
-            if (
-                error instanceof SyntaxError
-            ) {
-                throw new Error(
-                    `Invalid JSON in ${filePath}`,
-                    {
-                        cause: error,
-                    },
-                );
-            }
-
             throw error;
         }
     }
@@ -81,34 +61,13 @@ export class JsonStorage {
         storageKey: string,
         value: T,
     ): Promise<void> {
-        await this.ensureDirectory();
-
         const filePath =
             this.resolveFilePath(
                 storageKey,
             );
 
-        const temporaryFilePath =
-            `${filePath}.${process.pid}.${Date.now()}.tmp`;
-
-        const serialized =
-            `${JSON.stringify(
-                value,
-                null,
-                2,
-            )}\n`;
-
         try {
-            await writeFile(
-                temporaryFilePath,
-                serialized,
-                'utf8',
-            );
-
-            await rename(
-                temporaryFilePath,
-                filePath,
-            );
+            await atomicWriteJson(filePath, value);
         } catch (error) {
             throw new Error(
                 `Failed to write JSON storage file ${filePath}`,
@@ -151,6 +110,14 @@ export class JsonStorage {
         return this.resolveFilePath(
             storageKey,
         );
+    }
+
+    getDirectoryPath(): string {
+        return this.directoryPath;
+    }
+
+    async ensureReady(): Promise<void> {
+        await this.ensureDirectory();
     }
 
     private async ensureDirectory(): Promise<void> {

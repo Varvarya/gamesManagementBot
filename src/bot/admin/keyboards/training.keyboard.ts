@@ -13,6 +13,7 @@ export function createActiveTrainingsKeyboard(
                 `${AdminCallbacks.TrainingPrefix}${training.id}`,
             ),
         ]),
+        [Markup.button.callback('📦 Архів тренувань', AdminCallbacks.ArchivedTrainings)],
         [
             Markup.button.callback(
                 '◀️ Назад',
@@ -24,6 +25,7 @@ export function createActiveTrainingsKeyboard(
 
 export function createTrainingKeyboard(
     training: Training,
+    participantListTruncated = false,
 ) {
     const registrationButton =
         training.status === 'open'
@@ -31,13 +33,14 @@ export function createTrainingKeyboard(
                 '🔒 Закрити запис',
                 `${AdminCallbacks.TrainingClosePrefix}${training.id}`,
             )
-            : Markup.button.callback(
+            : training.status === 'closed' ? Markup.button.callback(
                 '🟢 Відкрити запис',
                 `${AdminCallbacks.TrainingOpenPrefix}${training.id}`,
-            );
+            ) : undefined;
 
     return Markup.inlineKeyboard([
-        [
+        ...(participantListTruncated ? [[Markup.button.callback('👥 Показати всіх', `${AdminCallbacks.TrainingParticipantsPrefix}${training.id}`)]] : []),
+        ...((training.status === 'open' || training.status === 'closed') ? [[
             Markup.button.callback(
                 '➕ Додати',
                 `${AdminCallbacks.TrainingAddPlayerPrefix}${training.id}`,
@@ -46,20 +49,14 @@ export function createTrainingKeyboard(
                 '➖ Прибрати',
                 `${AdminCallbacks.TrainingRemovePlayerPrefix}${training.id}`,
             ),
-        ],
-        [
-            registrationButton,
-            Markup.button.callback(
-                '🔄 Оновити',
-                `${AdminCallbacks.TrainingRefreshPrefix}${training.id}`,
-            ),
-        ],
-        [
-            Markup.button.callback(
-                '❌ Скасувати тренування',
-                `${AdminCallbacks.TrainingCancelPrefix}${training.id}`,
-            ),
-        ],
+        ]] : []),
+        ...((training.status === 'open' || training.status === 'closed') ? [[
+            ...(registrationButton ? [registrationButton] : []),
+            Markup.button.callback('❌ Скасувати', `${AdminCallbacks.TrainingCancelPrefix}${training.id}`),
+        ]] : []),
+        ...((training.status === 'open' || training.status === 'closed') ? [[
+            Markup.button.callback('✅ Завершити', `${AdminCallbacks.TrainingFinishPrefix}${training.id}`),
+        ]] : []),
         [
             Markup.button.callback(
                 '◀️ До списку',
@@ -73,13 +70,19 @@ export function createTrainingKeyboard(
     ]);
 }
 
+export function createTrainingParticipantsKeyboard(training: Training) {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback('◀️ Назад', `${AdminCallbacks.TrainingPrefix}${training.id}`)],
+    ]);
+}
+
 export function createTrainingCancelKeyboard(
     trainingId: string,
 ) {
     return Markup.inlineKeyboard([
         [
             Markup.button.callback(
-                '❌ Так, скасувати',
+                '✅ Підтвердити скасування',
                 `${AdminCallbacks.TrainingCancelConfirmPrefix}${trainingId}`,
             ),
         ],
@@ -106,7 +109,7 @@ export function createTrainingPlayerSearchKeyboard(
         ...players.map((player) => [
             Markup.button.callback(
                 player.displayName,
-                `${prefix}${trainingId}:${player.id}`,
+                `${prefix}${player.id}`,
             ),
         ]),
         [
@@ -144,7 +147,30 @@ function getStatusIcon(
         case 'finished':
             return '✅';
 
+        case 'archived':
+            return '📦';
+
         default:
             return '⚪️';
     }
+}
+
+export function createArchivedTrainingsKeyboard(trainings: Training[], month?: string) {
+    const current = month ?? new Date().toISOString().slice(0, 7);
+    const [year, value] = current.split('-').map(Number);
+    const previous = new Date(Date.UTC(year, value - 2, 1)).toISOString().slice(0, 7);
+    const next = new Date(Date.UTC(year, value, 1)).toISOString().slice(0, 7);
+    return Markup.inlineKeyboard([
+        ...trainings.map((training) => [Markup.button.callback(`📦 ${training.date} ${training.startTime} — ${training.title}`, `${AdminCallbacks.ArchivedTrainingPrefix}${training.id}`)]),
+        [Markup.button.callback('◀️ Місяць', `${AdminCallbacks.ArchiveMonthPrefix}${previous}`), Markup.button.callback('Місяць ▶️', `${AdminCallbacks.ArchiveMonthPrefix}${next}`)],
+        [Markup.button.callback('🔎 Пошук', AdminCallbacks.ArchiveSearch)],
+        [Markup.button.callback('◀️ До активних', AdminCallbacks.ActiveTrainings)],
+    ]);
+}
+
+export function createArchivedTrainingKeyboard(training?: Training, participantListTruncated = false) {
+    return Markup.inlineKeyboard([
+        ...(training && participantListTruncated ? [[Markup.button.callback('👥 Показати всіх', `${AdminCallbacks.TrainingParticipantsPrefix}${training.id}`)]] : []),
+        [Markup.button.callback('◀️ До архіву', AdminCallbacks.ArchivedTrainings)],
+    ]);
 }

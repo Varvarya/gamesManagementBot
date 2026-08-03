@@ -2,11 +2,13 @@ import schedule, {
     Job,
     RecurrenceRule,
 } from 'node-schedule';
+import { logger } from '../utils/logger';
 
 export type SchedulerTemplate = {
     id: string;
     dayOfWeek: number;
     publishTime: string;
+    timezone: string;
 };
 
 type SchedulerPublishHandler =
@@ -36,10 +38,7 @@ export class SchedulerService {
                     try {
                         await onPublish();
                     } catch (error) {
-                        console.error(
-                            `Scheduled job failed: ${template.id}`,
-                            error,
-                        );
+                        logger.error('scheduler.job_failed', { jobId: template.id, error });
                     }
                 },
             );
@@ -54,6 +53,7 @@ export class SchedulerService {
             template.id,
             job,
         );
+        logger.info('scheduler.job_scheduled', { jobId: template.id, dayOfWeek: template.dayOfWeek, publishTime: template.publishTime, timezone: template.timezone });
     }
 
     cancelTemplate(
@@ -73,6 +73,7 @@ export class SchedulerService {
         this.jobs.delete(
             templateId,
         );
+        logger.info('scheduler.job_cancelled', { jobId: templateId });
     }
 
     cancelByPrefix(
@@ -99,6 +100,7 @@ export class SchedulerService {
         }
 
         this.jobs.clear();
+        logger.info('scheduler.all_jobs_cancelled');
     }
 
     hasJob(
@@ -136,6 +138,7 @@ export class SchedulerService {
         rule.hour = hours;
         rule.minute = minutes;
         rule.second = 0;
+        rule.tz = template.timezone;
 
         return rule;
     }

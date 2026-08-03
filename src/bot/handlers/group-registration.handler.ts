@@ -1,23 +1,32 @@
 import { Context } from 'telegraf';
+
 import { ServicesContext } from '../../app/services.context';
-import { Training } from '../../domain/trainings/training.types';
 import { TrainingPublisherService } from '../../domain/trainings/training-publisher.service';
+import { logger } from '../../utils/logger';
 
-const REGISTRATION_COMMAND_REGEX = /^([+-])([1-4])$/;
-
-type ParsedRegistrationCommand = {
+type ParsedCommand = {
     action: '+' | '-';
     places: number;
+    playerName?: string;
+    date?: string;
+    startTime?: string;
+    unsupported?: boolean;
 };
 
 export class GroupRegistrationHandler {
+    private readonly handledUpdates =
+        new Set<number>();
+
     constructor(
         private readonly services: ServicesContext,
         private readonly publisher: TrainingPublisherService,
     ) {}
 
-    async handle(ctx: Context): Promise<void> {
-        const message = ctx.message;
+    async handle(
+        ctx: Context,
+    ): Promise<void> {
+        const message =
+            ctx.message;
 
         if (
             !message ||
@@ -28,97 +37,296 @@ export class GroupRegistrationHandler {
             return;
         }
 
-        const command = this.parseCommand(message.text);
+        if (
+            !message.text
+                .trim()
+                .match(/^[+-]/)
+        ) {
+            return;
+        }
+
+        const updateId =
+            ctx.update.update_id;
+
+        if (
+            this.handledUpdates.has(
+                updateId,
+            )
+        ) {
+            return;
+        }
+
+        this.handledUpdates.add(
+            updateId,
+        );
+
+        if (
+            this.handledUpdates.size >
+            10_000
+        ) {
+            this.handledUpdates.delete(
+                this.handledUpdates
+                    .values()
+                    .next()
+                    .value!,
+            );
+        }
+
+        const command =
+            this.parseCommand(
+                message.text,
+            );
 
         if (!command) {
+            await ctx.reply(
+                'Невірний формат. Використайте +1, +1 Імʼя, - або -1.',
+            );
+
+            return;
+        }
+
+        if (command.unsupported) {
+            await ctx.reply(
+                'Підтримується лише +1. Додавайте кожного гостя окремо: +1 Імʼя.',
+            );
+
             return;
         }
 
         const replyToMessageId =
-            'reply_to_message' in message && message.reply_to_message
-                ? message.reply_to_message.message_id
+            'reply_to_message' in
+            message &&
+            message.reply_to_message
+                ? message
+                    .reply_to_message
+                    .message_id
                 : undefined;
 
-        try {
-            const training =
-                command.action === '+'
-                    ? await this.services.registration.register({
-                        telegramUser: {
-                            id: message.from.id,
-                            first_name: message.from.first_name,
-                            username: message.from.username,
-                        },
-                        chatId: message.chat.id,
-                        replyToMessageId,
-                        places: command.places,
-                    })
-                    : await this.services.registration.unregister({
-                        telegramUser: {
-                            id: message.from.id,
-                            first_name: message.from.first_name,
-                            username: message.from.username,
-                        },
-                        chatId: message.chat.id,
-                        replyToMessageId,
-                        places: command.places,
-                    });
+        const input = {
+            telegramUser: {
+                id: message.from.id,
+                first_name:
+                message.from
+                    .first_name,
+                username:
+                message.from
+                    .username,
+            },
+            chatId:
+            message.chat.id,
+            replyToMessageId,
+            places:
+            command.places,
+            playerName:
+            command.playerName,
+            date:
+            command.date,
+            startTime:
+            command.startTime,
+        };
 
-            await this.publisher.refreshMessage(training.id);
-            await this.deleteActionMessageIfEnabled(
-                ctx,
-            );
+        try {
+            const result =
+                command.action === '+'
+                    ? await this.services.registration.registerDetailed(
+                        input,
+                    )
+                    : await this.services.registration.unregisterDetailed(
+                        input,
+                    );
+
+            if (
+                result.outcome !==
+                'not_registered'
+            ) {
+                await this.publisher.refreshMessage(
+                    result.training.id,
+                );
+            }
+
+            if (
+                result.outcome ===
+                'not_registered'
+            ) {
+                const feedbackMessage =
+                    await ctx.reply(
+                        'ℹ️ Ви не були зареєстровані на це тренування.',
+                    );
+
+                await this.deleteFeedbackIfEnabled(
+                    ctx,
+                    feedbackMessage
+                        .message_id,
+                );
+
+                return;
+            }
         } catch (error) {
-            // У групу нічого не відправляємо.
-            // Пізніше тут буде ignored action log.
-            console.error('Registration action ignored:', error);
+            logger.warn(
+                'registration.action_rejected',
+                {
+                    chatId:
+                    ctx.chat?.id,
+                    updateId:
+                    ctx.update
+                        .update_id,
+                    error,
+                },
+            );
+
+            await ctx.reply(
+                this.errorFeedback(
+                    error,
+                ),
+            );
         }
     }
 
     private parseCommand(
         text: string,
-    ): ParsedRegistrationCommand | undefined {
-        const match = text.trim().match(REGISTRATION_COMMAND_REGEX);
+    ): ParsedCommand | undefined {
+        const value =
+            text.trim();
 
-        if (!match) {
+        if (
+            /^-1?$/.test(value)
+        ) {
+            return {
+                action: '-',
+                places: 1,
+            };
+        }
+
+        const plus =
+            value.match(
+                /^\+(\d+)(?:\s+(.+))?$/i,
+            );
+
+        if (!plus) {
             return undefined;
         }
 
+        const places =
+            Number(plus[1]);
+
+        let remainder:
+            | string
+            | undefined =
+            plus[2]?.trim();
+
+        let date:
+            | string
+            | undefined;
+
+        let startTime:
+            | string
+            | undefined;
+
+        const selector =
+            remainder?.match(
+                /^(.*?)(?:\s+)?at\s+(?:(\d{4}-\d{2}-\d{2})\s+)?([01]\d|2[0-3]):([0-5]\d)$/i,
+            );
+
+        if (selector) {
+            const name =
+                selector[1].trim();
+
+            remainder =
+                name.length > 0
+                    ? name
+                    : undefined;
+
+            date =
+                selector[2];
+
+            startTime =
+                `${selector[3]}:${selector[4]}`;
+        }
+
         return {
-            action: match[1] as '+' | '-',
-            places: Number(match[2]),
+            action: '+',
+            places,
+            playerName:
+            remainder,
+            date,
+            startTime,
+            unsupported:
+                places !== 1,
         };
     }
 
-    private async deleteActionMessageIfEnabled(
+    private errorFeedback(
+        error: unknown,
+    ): string {
+        const message =
+            error instanceof Error
+                ? error.message
+                : '';
+
+        if (
+            message.includes(
+                'already registered',
+            )
+        ) {
+            return 'ℹ️ Цей гравець уже зареєстрований.';
+        }
+
+        if (
+            message.includes(
+                'not open',
+            )
+        ) {
+            return '🔒 Реєстрацію на це тренування закрито.';
+        }
+
+        if (
+            message.includes(
+                'not found',
+            ) ||
+            message.includes(
+                'ambiguous',
+            )
+        ) {
+            return '❓ Тренування не знайдено. Відповідайте на оголошення або вкажіть час: +1 at HH:mm (за потреби +1 at YYYY-MM-DD HH:mm).';
+        }
+
+        return 'Не вдалося змінити реєстрацію. Перевірте формат і спробуйте ще раз.';
+    }
+
+    private async deleteFeedbackIfEnabled(
         ctx: Context,
+        messageId: number,
     ): Promise<void> {
         const settings =
             await this.services.repositories.settings.get();
 
-        if (!settings.cleanChatMode) {
+        if (
+            !settings.cleanChatMode ||
+            !ctx.chat?.id
+        ) {
             return;
         }
-
-        const messageId =
-            ctx.message?.message_id;
 
         const chatId =
-            ctx.chat?.id;
+            ctx.chat.id;
 
-        if (!messageId || !chatId) {
-            return;
-        }
-
-        try {
-            await ctx.telegram.deleteMessage(
-                chatId,
-                messageId,
-            );
-        } catch (error) {
-            console.error(
-                'Failed to delete registration message:',
-                error,
-            );
-        }
+        setTimeout(() => {
+            ctx.telegram
+                .deleteMessage(
+                    chatId,
+                    messageId,
+                )
+                .catch(
+                    error =>
+                        logger.warn(
+                            'telegram.feedback_cleanup_failed',
+                            {
+                                chatId,
+                                messageId,
+                                error,
+                            },
+                        ),
+                );
+        }, 8_000);
     }
 }

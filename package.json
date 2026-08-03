@@ -6,7 +6,14 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
-    "build": "tsc"
+    "start:prod": "NODE_ENV=production node dist/index.js",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "migration": "node dist/cli.js migrate",
+    "backup": "node dist/cli.js backup",
+    "restore": "node dist/cli.js restore",
+    "health": "node dist/healthcheck.js",
+    "test": "node --import tsx --test src/bot/admin/players-ux.test.ts src/bot/admin/training-card.test.ts src/bot/admin/ui/admin-ui.test.ts src/domain/templates/template-scheduler.service.test.ts src/domain/templates/template.migration.test.ts src/domain/trainings/training-message.renderer.test.ts src/domain/trainings/training-publisher.service.test.ts src/domain/trainings/training.service.test.ts src/domain/trainings/registration.service.test.ts src/domain/players/player.service.test.ts src/domain/settings/settings.service.test.ts src/domain/config/super-admin-config.service.test.ts src/bot/admin/admin-flow-consistency.test.ts src/bot/admin/admin-message-routing.test.ts src/bot/admin/handlers/admin-training.handler.test.ts src/bot/admin/handlers/admin-settings.handler.test.ts src/scheduler/training-cancellation.scheduler.test.ts src/storage/repositories/trainings.repository.test.ts src/storage/backup.service.test.ts src/storage/storage-reliability.test.ts src/e2e/production-lifecycle.e2e.test.ts"
   },
   "dependencies": {
     "dotenv": "^17.4.2",

@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { atomicWriteJson } from '../atomicWrite';
+import { atomicWriteJson, backupBeforeMigration, readReliableJson } from '../atomicWrite';
 
 type EntityWithId = {
     id: string;
@@ -21,20 +21,19 @@ export class BaseJsonRepository<T extends EntityWithId> {
         await fs.mkdir(path.dirname(this.filePath), { recursive: true });
 
         try {
-            const raw = await fs.readFile(this.filePath, 'utf-8');
-            this.cache = JSON.parse(raw) as T[];
+            const loaded = await readReliableJson(this.filePath, (value): value is T[] => Array.isArray(value) && value.every((item) => Boolean(item && typeof item === 'object' && typeof (item as T).id === 'string')));
+            this.cache = loaded.data;
+            if (loaded.migrated) {
+                await backupBeforeMigration(this.filePath, loaded.schemaVersion);
+                await this.saveAll();
+            }
         } catch (error) {
             const code = (error as NodeJS.ErrnoException).code;
 
             if (code === 'ENOENT') {
                 this.cache = [...this.defaultValue];
                 await this.saveAll();
-            } else {
-                const backupPath = `${this.filePath}.corrupted-${Date.now()}`;
-                await fs.rename(this.filePath, backupPath);
-                this.cache = [...this.defaultValue];
-                await this.saveAll();
-            }
+            } else throw error;
         }
 
         this.isLoaded = true;

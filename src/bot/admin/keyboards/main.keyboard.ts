@@ -4,8 +4,11 @@ import { AdminCallbacks } from '../callbacks/admin-callbacks';
 export function createAdminMainKeyboard(
     activeTrainingsCount: number,
     unconfirmedPlayersCount: number,
+    setup?: { hasChats: boolean; hasTemplates: boolean },
 ) {
     return Markup.inlineKeyboard([
+        ...(!setup?.hasChats ? [[Markup.button.callback('1️⃣ Додати перший чат', AdminCallbacks.AddChat)]] : []),
+        ...(setup?.hasChats && !setup.hasTemplates ? [[Markup.button.callback('2️⃣ Створити розклад', AdminCallbacks.CreateTemplate)]] : []),
         [
             Markup.button.callback(
                 '📅 Розклад',
@@ -29,6 +32,12 @@ export function createAdminMainKeyboard(
                 }`,
                 AdminCallbacks.Players,
             ),
+            Markup.button.callback(
+                '💬 Чати',
+                AdminCallbacks.Chats,
+            ),
+        ],
+        [
             Markup.button.callback(
                 '⚙️ Налаштування',
                 AdminCallbacks.Settings,

@@ -1,7 +1,7 @@
 import { Context } from 'telegraf';
 import { ServicesContext } from '../../../app/services.context';
 import { AdminCallbacks } from '../callbacks/admin-callbacks';
-import { createAdminMainKeyboard } from '../keyboards/main.keyboard';
+import { createAdminMainKeyboard, createMainMenuBackKeyboard } from '../keyboards/main.keyboard';
 
 export class AdminMenuHandler {
     constructor(
@@ -9,14 +9,16 @@ export class AdminMenuHandler {
     ) {}
 
     canHandle(callback: string): boolean {
-        return callback === AdminCallbacks.MainMenu;
+        return callback === AdminCallbacks.MainMenu || callback === AdminCallbacks.Help;
     }
 
     async handle(
         ctx: Context,
         callback: string,
     ): Promise<void> {
-        if (callback === AdminCallbacks.MainMenu) {
+        if (callback === AdminCallbacks.Help) {
+            await this.showHelp(ctx);
+        } else if (callback === AdminCallbacks.MainMenu) {
             await this.showMain(ctx);
         }
     }
@@ -38,25 +40,41 @@ export class AdminMenuHandler {
 
         const unconfirmedPlayers =
             await this.services.repositories.players.listUnconfirmed();
+        const chats = await this.services.chats.getAll();
+        const templates = await this.services.repositories.templates.list();
+        const setupLines = chats.length === 0
+            ? ['🚀 Перший запуск', '1. Додайте груповий чат', '2. Створіть розклад', '3. Перевірте час публікації']
+            : templates.length === 0
+                ? ['🚀 Налаштування: 1 з 3', '✅ Чат додано', '2. Створіть розклад і виберіть чат', '3. Перевірте час публікації']
+                : [];
 
-        await this.services.adminUi.show(
+        await this.services.adminUi.showRootMenu(
             ctx,
             [
                 `🏸 ${settings.title}`,
                 '',
-                'Панель керування клубом',
-                '',
-                activeTrainings.length > 0
-                    ? `Найближчих тренувань: ${activeTrainings.length}`
-                    : 'Активних тренувань зараз немає',
+                setupLines.length ? setupLines.join('\n') : 'Керування клубом',
                 unconfirmedPlayers.length > 0
                     ? `⚠️ ${unconfirmedPlayers.length} гравців очікують підтвердження`
-                    : '✅ Усі імена гравців підтверджені',
-            ].join('\n'),
+                    : undefined,
+            ].filter((line): line is string => line !== undefined).join('\n'),
             createAdminMainKeyboard(
                 activeTrainings.length,
                 unconfirmedPlayers.length,
+                { hasChats: chats.length > 0, hasTemplates: templates.length > 0 },
             ),
         );
+    }
+
+    private async showHelp(ctx: Context): Promise<void> {
+        await this.services.adminUi.show(ctx, [
+            '❓ Як користуватися ботом', '',
+            '💬 Чати — додайте групу, де бот публікуватиме тренування.',
+            '📅 Розклад — створіть шаблон, виберіть чат, дні та час.',
+            '📣 Бот сам опублікує тренування у вибраний час.',
+            '👤 Гравці записуються відповіддю +1. Після заповнення місць вони потрапляють до листа очікування.',
+            '🏸 У тренуванні можна додати чи прибрати гравця, закрити запис або скасувати заняття.',
+            '❌ Кнопка «Скасувати» завершує поточне налаштування без збереження.',
+        ].join('\n'), createMainMenuBackKeyboard());
     }
 }

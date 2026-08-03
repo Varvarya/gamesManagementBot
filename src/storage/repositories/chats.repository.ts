@@ -1,9 +1,8 @@
 import {
     mkdir,
-    readFile,
-    writeFile,
 } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { atomicWriteJson, backupBeforeMigration, readReliableJson } from '../atomicWrite';
 
 import {
     ChatConfig,
@@ -20,22 +19,12 @@ export class ChatsRepository {
 
     async load(): Promise<void> {
         try {
-            const content = await readFile(
-                this.filePath,
-                'utf8',
-            );
-
-            const parsed: unknown = JSON.parse(
-                content,
-            );
-
-            if (!this.isChatsRecord(parsed)) {
-                throw new Error(
-                    `Invalid chats repository data: ${this.filePath}`,
-                );
+            const loaded = await readReliableJson(this.filePath, (value): value is unknown => Boolean(value && typeof value === 'object'));
+            this.chats = this.migrateChats(loaded.data);
+            if (loaded.migrated || !this.isChatsRecord(loaded.data)) {
+                await backupBeforeMigration(this.filePath, loaded.schemaVersion);
+                await this.save();
             }
-
-            this.chats = parsed;
         } catch (error) {
             if (
                 error instanceof Error &&
@@ -196,6 +185,11 @@ export class ChatsRepository {
         await this.save();
     }
 
+    async replaceAll(chats: ChatConfig[]): Promise<void> {
+        this.chats = Object.fromEntries(chats.map((chat) => [String(chat.id), { ...chat }]));
+        await this.save();
+    }
+
     private async save(): Promise<void> {
         await mkdir(
             dirname(
@@ -206,15 +200,7 @@ export class ChatsRepository {
             },
         );
 
-        await writeFile(
-            this.filePath,
-            JSON.stringify(
-                this.chats,
-                null,
-                2,
-            ),
-            'utf8',
-        );
+        await atomicWriteJson(this.filePath, this.chats);
     }
 
     private isChatsRecord(
@@ -240,6 +226,22 @@ export class ChatsRepository {
                     chat,
                 ),
         );
+    }
+
+    private migrateChats(value: unknown): Record<string, ChatConfig> {
+        const candidates = Array.isArray(value) ? value : Object.values(value as Record<string, unknown>);
+        const result: Record<string, ChatConfig> = {};
+        for (const candidate of candidates) {
+            if (!candidate || typeof candidate !== 'object') throw new Error('Invalid chat entry; migration refused to discard it');
+            const record = candidate as Record<string, unknown>;
+            const nested = record.gameChat ?? record.chat;
+            const source = nested && typeof nested === 'object' ? { ...record, ...(nested as Record<string, unknown>) } : record;
+            const id = source.id ?? record.chatId ?? (typeof nested === 'number' ? nested : undefined);
+            if (!Number.isSafeInteger(id)) throw new Error('Chat entry has no valid id');
+            const chat: ChatConfig = { id: id as number, name: typeof source.name === 'string' && source.name.trim() ? source.name.trim() : `Chat ${id}`, enabled: source.enabled !== false };
+            result[String(chat.id)] = chat;
+        }
+        return result;
     }
 
     private isChatConfig(

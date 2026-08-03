@@ -7,6 +7,7 @@ import {
     CreateChatInput,
     UpdateChatInput,
 } from './chat.types';
+import { logger } from '../../utils/logger';
 
 export class ChatService {
     constructor(
@@ -67,9 +68,9 @@ export class ChatService {
     ): Promise<ChatConfig> {
         this.validateInput(input);
 
-        return this.repository.create(
-            input,
-        );
+        const chat = await this.repository.create(input);
+        logger.info('chat.created', { chatId: chat.id, enabled: chat.enabled });
+        return chat;
     }
 
     async update(
@@ -85,10 +86,9 @@ export class ChatService {
             );
         }
 
-        return this.repository.update(
-            id,
-            input,
-        );
+        const chat = await this.repository.update(id, input);
+        logger.info('chat.updated', { chatId: id, changedFields: Object.keys(input) });
+        return chat;
     }
 
     async upsert(
@@ -96,9 +96,9 @@ export class ChatService {
     ): Promise<ChatConfig> {
         this.validateInput(input);
 
-        return this.repository.upsert(
-            input,
-        );
+        const chat = await this.repository.upsert(input);
+        logger.info('chat.upserted', { chatId: chat.id, enabled: chat.enabled });
+        return chat;
     }
 
     async toggle(
@@ -107,13 +107,15 @@ export class ChatService {
         const chat =
             await this.getRequired(id);
 
-        return this.repository.update(
+        const updated = await this.repository.update(
             id,
             {
                 enabled:
                     !chat.enabled,
             },
         );
+        logger.info('chat.toggled', { chatId: id, enabled: updated.enabled });
+        return updated;
     }
 
     async delete(
@@ -122,6 +124,7 @@ export class ChatService {
         await this.repository.delete(
             id,
         );
+        logger.info('chat.deleted', { chatId: id });
     }
 
     private validateInput(

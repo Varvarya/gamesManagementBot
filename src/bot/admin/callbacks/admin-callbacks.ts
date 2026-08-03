@@ -1,59 +1,97 @@
 export const AdminCallbacks = {
-    MainMenu: 'admin:main',
+    MainMenu: 'm',
 
-    Schedule: 'admin:schedule',
-    ActiveTrainings: 'admin:active_trainings',
-    Players: 'admin:players',
-    Settings: 'admin:settings',
+    Schedule: 's',
+    ActiveTrainings: 'tr:a',
+    ArchivedTrainings: 'tr:r',
+    ArchivedTrainingPrefix: 'tr:ra:',
+    ArchiveMonthPrefix: 'tr:rm:',
+    ArchiveSearch: 'tr:rs',
 
-    CreateTemplate: 'admin:template:create',
-    ConfirmCreateTemplate:
-        'admin:template:create:confirm',
-    CancelCreateTemplate:
-        'admin:template:create:cancel',
+    Players: 'p',
+    Settings: 'cfg',
+    Chats: 'c',
 
-    ConfirmEditTemplate:
-        'admin:template:edit:confirm',
-    CancelEditTemplate:
-        'admin:template:edit:cancel',
+    AddChat: 'c:a',
+    ConfirmAddChat: 'c:ac',
 
-    TemplatePrefix: 'admin:template:',
-    TemplateEditPrefix: 'admin:template:edit:',
-    TemplateTogglePrefix: 'admin:template:toggle:',
-    TemplateDeletePrefix: 'admin:template:delete:',
-    TemplateDeleteConfirmPrefix:
-        'admin:template:delete_confirm:',
-    TemplateChatPrefix: 'template:chat:',
-    SelectTemplateChat: 'template:chat:select',
+    CreateTemplate: 't:c',
+    ConfirmCreateTemplate: 't:cc',
+    CancelCreateTemplate: 't:cx',
 
-    UnconfirmedPlayers:
-        'admin:players:unconfirmed',
-    AllPlayers: 'admin:players:all',
+    ConfirmEditTemplate: 't:ec',
+    CancelEditTemplate: 't:ex',
 
-    CreatePlayer: 'admin:player:create',
-    PlayerPrefix: 'admin:player:',
+    TemplatePrefix: 't:v:',
+    TemplateEditPrefix: 't:e:',
+    TemplateTogglePrefix: 't:g:',
+    TemplateDeletePrefix: 't:d:',
+    TemplateDeleteConfirmPrefix: 't:x:',
 
-    TrainingPrefix: 'admin:training:',
-    TrainingClosePrefix: 'admin:training:close:',
-    TrainingOpenPrefix: 'admin:training:open:',
-    TrainingCancelPrefix: 'admin:training:cancel:',
-    TrainingCancelConfirmPrefix:
-        'admin:training:cancel_confirm:',
-    TrainingRefreshPrefix:
-        'admin:training:refresh:',
+    TemplateChatPrefix: 'tc:',
+    SelectTemplateChat: 'tc:s',
+    BackFromTemplateChat: 'tc:b',
+    BackFromTemplatePreview: 'tp:b',
 
-    TrainingAddPlayerPrefix:
-        'admin:training:add_player:',
-    TrainingRemovePlayerPrefix:
-        'admin:training:remove_player:',
+    UnconfirmedPlayers: 'p:u',
+    AllPlayers: 'p:a',
+    KnownPlayers: 'p:k',
+    InactivePlayers: 'p:i',
+    PlayerShowFirst: 'p:f',
+    PlayerBrowseNext: 'p:bn',
+    PlayerBrowsePrevious: 'p:bp',
+    PlayerNewSearch: 'p:us',
+    PlayerNewConfirm: 'p:uc',
+    PlayerNewEdit: 'p:ue',
+    PlayerNewMerge: 'p:um',
+    PlayerIncludeInactive: 'p:ii',
+    PlayerCreateAnyway: 'p:ca',
+    PlayerRenameAnyway: 'p:ra',
 
-    TrainingSelectAddPlayerPrefix:
-        'admin:training:select_add_player:',
-    TrainingSelectRemovePlayerPrefix:
-        'admin:training:select_remove_player:',
+    CreatePlayer: 'p:c',
+    ConfirmCreatePlayer: 'p:cc',
+    SearchPlayers: 'p:s',
 
-    SettingsCancelHours:
-        'admin:settings:cancel_hours',
-    SettingsToggleCleanChat:
-        'admin:settings:toggle_clean_chat',
+    PlayerPrefix: 'p:v:',
+    PlayerConfirmPrefix: 'p:cf:',
+    PlayerUnconfirmPrefix: 'p:cu:',
+    PlayerAliasPrefix: 'p:al:',
+    PlayerTogglePrefix: 'p:t:',
+    PlayerDeletePrefix: 'p:d:',
+    PlayerDeleteConfirmPrefix: 'p:dx:',
+    PlayerMergePrefix: 'p:m:',
+    PlayerMergeTargetPrefix: 'p:mt:',
+    PlayerMergeConfirmPrefix: 'p:mc:',
+    PlayerAddTrainingPrefix: 'p:at:',
+    PlayerRemoveTrainingPrefix: 'p:rt:',
+    PlayerSelectAddTrainingPrefix: 'p:sat:',
+    PlayerSelectRemoveTrainingPrefix: 'p:srt:',
+
+    TrainingPrefix: 'tr:v:',
+    TrainingClosePrefix: 'tr:c:',
+    TrainingOpenPrefix: 'tr:o:',
+    TrainingCancelPrefix: 'tr:x:',
+    TrainingCancelConfirmPrefix: 'tr:xc:',
+    TrainingRefreshPrefix: 'tr:r:',
+    TrainingFinishPrefix: 'tr:f:',
+    TrainingParticipantsPrefix: 'tr:p:',
+
+    TrainingAddPlayerPrefix: 'tr:ap:',
+    TrainingRemovePlayerPrefix: 'tr:rp:',
+    TrainingSelectAddPlayerPrefix: 'tr:sap:',
+    TrainingSelectRemovePlayerPrefix: 'tr:srp:',
+
+    ChatPrefix: 'c:v:',
+    ChatTogglePrefix: 'c:t:',
+    ChatDeletePrefix: 'c:d:',
+    ChatDeleteConfirmPrefix: 'c:x:',
+
+    SettingsToggleCleanChat: 'cfg:tc',
+    SettingsEditPrefix: 'cfg:e:',
+    SettingsAdmins: 'cfg:a',
+    SettingsAddAdmin: 'cfg:aa',
+    SettingsRemoveAdminPrefix: 'cfg:ar:',
+    SettingsStatus: 'cfg:st',
+
+    Help: 'h',
 } as const;

@@ -1,209 +1,150 @@
 import { createId } from '../../utils/ids';
 import { nowIso } from '../../utils/date';
-import {
-    ParticipantEntry,
-    ParticipantSource,
-    Training,
-} from './training.types';
+import { ParticipantEntry, ParticipantSource, Training } from './training.types';
 import { TrainingService } from './training.service';
+import { logger } from '../../utils/logger';
 
-type AddOrUpdateParticipantInput = {
+type AddInput = {
     trainingId: string;
     playerId: string;
+    displayName: string;
     telegramUserId?: number;
     places: number;
     source: ParticipantSource;
+    overrideState?: boolean;
 };
 
-type RemoveParticipantPlacesInput = {
-    trainingId: string;
-    playerId: string;
-    places: number;
+export type ParticipantMutation = {
+    training: Training;
+    outcome: 'registered' | 'waitlisted' | 'removed' | 'not_registered';
+    promotedPlayerIds: string[];
 };
 
 export class TrainingParticipantsService {
-    constructor(
-        private readonly trainings: TrainingService,
-    ) {}
+    private readonly queues = new Map<string, Promise<void>>();
 
-    async addOrUpdateParticipant(
-        input: AddOrUpdateParticipantInput,
-    ): Promise<Training> {
+    constructor(private readonly trainings: TrainingService) {}
+
+    async addParticipant(input: AddInput): Promise<ParticipantMutation> {
         this.validatePlaces(input.places);
+        const displayName = input.displayName.trim();
+        if (!displayName) throw new Error('Participant display name is required');
+        return this.serialize(input.trainingId, async () => {
+            const training = await this.trainings.getRequired(input.trainingId);
+            this.ensureTrainingIsOpen(training, input.overrideState);
 
-        const training = await this.trainings.getRequired(input.trainingId);
+            if (this.findParticipant(training, input.playerId)) {
+                throw new Error('Player is already registered');
+            }
 
-        this.ensureTrainingIsOpen(training);
+            const participant: ParticipantEntry = {
+                id: createId('participant'),
+                playerId: input.playerId,
+                displayName,
+                telegramUserId: input.telegramUserId,
+                places: 1,
+                source: input.source,
+                status: this.countFreePlaces(training) > 0 ? 'active' : 'waiting',
+                createdAt: nowIso(),
+                updatedAt: nowIso(),
+            };
+            if (participant.status === 'active') training.participants.push(participant);
+            else training.waitlist.push(participant);
 
-        const existing = this.findParticipant(training, input.playerId);
-
-        if (existing) {
-            existing.places = input.places;
-            existing.updatedAt = nowIso();
-
-            this.rebalanceWaitlist(training);
-
-            return this.trainings.save(training);
-        }
-
-        const occupiedPlaces = this.countActivePlaces(training);
-
-        const participant: ParticipantEntry = {
-            id: createId('participant'),
-            playerId: input.playerId,
-            telegramUserId: input.telegramUserId,
-            places: input.places,
-            source: input.source,
-            status:
-                occupiedPlaces + input.places <= training.placesLimit
-                    ? 'active'
-                    : 'waiting',
-            createdAt: nowIso(),
-            updatedAt: nowIso(),
-        };
-
-        if (participant.status === 'active') {
-            training.participants.push(participant);
-        } else {
-            training.waitlist.push(participant);
-        }
-
-        this.rebalanceWaitlist(training);
-
-        return this.trainings.save(training);
+            const saved = await this.trainings.save(training);
+            logger.info('registration.added', { trainingId: saved.id, playerId: input.playerId, outcome: participant.status, source: input.source });
+            return {
+                training: saved,
+                outcome: participant.status === 'active' ? 'registered' : 'waitlisted',
+                promotedPlayerIds: [],
+            };
+        });
     }
 
-    async removeParticipantPlaces(
-        input: RemoveParticipantPlacesInput,
-    ): Promise<Training> {
+    // Compatibility entry point used by the admin UI.
+    async addOrUpdateParticipant(input: AddInput): Promise<Training> {
+        return (await this.addParticipant(input)).training;
+    }
+
+    async removeParticipant(input: {
+        trainingId: string;
+        playerId: string;
+        overrideState?: boolean;
+    }): Promise<ParticipantMutation> {
+        return this.serialize(input.trainingId, async () => {
+            const training = await this.trainings.getRequired(input.trainingId);
+            this.ensureTrainingIsOpen(training, input.overrideState);
+            const existed = Boolean(this.findParticipant(training, input.playerId));
+            training.participants = training.participants.filter((entry) => entry.playerId !== input.playerId);
+            training.waitlist = training.waitlist.filter((entry) => entry.playerId !== input.playerId);
+            if (!existed) return { training, outcome: 'not_registered', promotedPlayerIds: [] };
+
+            const promotedPlayerIds = this.promoteWaitlist(training);
+            const saved = await this.trainings.save(training);
+            logger.info('registration.removed', { trainingId: saved.id, playerId: input.playerId, promotedPlayerIds });
+            return {
+                training: saved,
+                outcome: 'removed',
+                promotedPlayerIds,
+            };
+        });
+    }
+
+    async removeParticipantPlaces(input: { trainingId: string; playerId: string; places: number }): Promise<Training> {
         this.validatePlaces(input.places);
+        return (await this.removeParticipant(input)).training;
+    }
 
-        const training = await this.trainings.getRequired(input.trainingId);
-
-        this.ensureTrainingIsOpen(training);
-
-        const active = training.participants.find(
-            (participant) => participant.playerId === input.playerId,
-        );
-
-        if (active) {
-            active.places -= input.places;
-            active.updatedAt = nowIso();
-
-            if (active.places <= 0) {
-                training.participants = training.participants.filter(
-                    (participant) => participant.id !== active.id,
-                );
-            }
-
-            this.rebalanceWaitlist(training);
-
-            return this.trainings.save(training);
-        }
-
-        const waiting = training.waitlist.find(
-            (participant) => participant.playerId === input.playerId,
-        );
-
-        if (waiting) {
-            waiting.places -= input.places;
-            waiting.updatedAt = nowIso();
-
-            if (waiting.places <= 0) {
-                training.waitlist = training.waitlist.filter(
-                    (participant) => participant.id !== waiting.id,
-                );
-            }
-
-            return this.trainings.save(training);
-        }
-
-        return training;
+    async removeParticipantCompletely(input: { trainingId: string; playerId: string; overrideState?: boolean }): Promise<Training> {
+        return (await this.removeParticipant(input)).training;
     }
 
     countActivePlaces(training: Training): number {
-        return training.participants.reduce(
-            (sum, participant) => sum + participant.places,
-            0,
-        );
+        return training.participants.reduce((sum, entry) => sum + entry.places, 0);
     }
 
     countFreePlaces(training: Training): number {
-        return Math.max(
-            training.placesLimit - this.countActivePlaces(training),
-            0,
-        );
+        return Math.max(training.placesLimit - this.countActivePlaces(training), 0);
     }
 
-    private findParticipant(
-        training: Training,
-        playerId: string,
-    ): ParticipantEntry | undefined {
-        return (
-            training.participants.find(
-                (participant) => participant.playerId === playerId,
-            ) ||
-            training.waitlist.find(
-                (participant) => participant.playerId === playerId,
-            )
-        );
+    private findParticipant(training: Training, playerId: string): ParticipantEntry | undefined {
+        return [...training.participants, ...training.waitlist].find((entry) => entry.playerId === playerId);
     }
 
-    private rebalanceWaitlist(training: Training): void {
-        let freePlaces = this.countFreePlaces(training);
-
-        while (freePlaces > 0 && training.waitlist.length > 0) {
-            const next = training.waitlist[0];
-
-            if (next.places > freePlaces) {
-                break;
-            }
-
-            training.waitlist.shift();
-
+    private promoteWaitlist(training: Training): string[] {
+        const promoted: string[] = [];
+        while (this.countFreePlaces(training) > 0 && training.waitlist.length > 0) {
+            const next = training.waitlist.shift()!;
             next.status = 'active';
             next.updatedAt = nowIso();
-
             training.participants.push(next);
-
-            freePlaces -= next.places;
+            promoted.push(next.playerId);
         }
+        return promoted;
     }
 
-    async removeParticipantCompletely(input: {
-        trainingId: string;
-        playerId: string;
-    }): Promise<Training> {
-        const training = await this.trainings.getRequired(
-            input.trainingId,
-        );
-
-        training.participants =
-            training.participants.filter(
-                (participant) =>
-                    participant.playerId !== input.playerId,
-            );
-
-        training.waitlist =
-            training.waitlist.filter(
-                (participant) =>
-                    participant.playerId !== input.playerId,
-            );
-
-        this.rebalanceWaitlist(training);
-
-        return this.trainings.save(training);
-    }
-
-    private ensureTrainingIsOpen(training: Training): void {
-        if (training.status !== 'open') {
-            throw new Error('Training is not open');
+    private ensureTrainingIsOpen(training: Training, override = false): void {
+        if (training.status === 'archived' || training.status === 'finished') {
+            throw new Error('Archived training is read-only');
         }
+        if (!override && training.status !== 'open') throw new Error('Training is not open');
     }
 
     private validatePlaces(places: number): void {
-        if (!Number.isInteger(places) || places < 1 || places > 4) {
-            throw new Error('places must be an integer from 1 to 4');
+        if (places !== 1) throw new Error('Only +1 registration is supported; add each guest separately');
+    }
+
+    private async serialize<T>(trainingId: string, operation: () => Promise<T>): Promise<T> {
+        const previous = this.queues.get(trainingId) ?? Promise.resolve();
+        let release!: () => void;
+        const current = new Promise<void>((resolve) => { release = resolve; });
+        this.queues.set(trainingId, current);
+        await previous;
+        try {
+            return await operation();
+        } finally {
+            release();
+            if (this.queues.get(trainingId) === current) this.queues.delete(trainingId);
         }
     }
 }
