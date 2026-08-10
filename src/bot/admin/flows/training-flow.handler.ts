@@ -7,17 +7,21 @@ import {
     createTrainingKeyboard,
     createTrainingPlayerSearchKeyboard,
     createArchivedTrainingsKeyboard,
+    createUnknownTrainingPlayerKeyboard,
+    createNewTrainingPlayerPreviewKeyboard,
+    createTrainingPlayerDuplicateKeyboard,
 } from '../keyboards/training.keyboard';
-import { isTrainingParticipantListTruncated, renderTrainingCard } from '../ui/admin-formatters';
+import { formatDate, formatTimeRange, isTrainingParticipantListTruncated, renderTrainingCard } from '../ui/admin-formatters';
 import { Training } from '../../../domain/trainings/training.types';
 import { AdminFlowState } from './admin-flow.types';
+import { validateReservedPlaces } from '../../../domain/trainings/reserved-places';
 
 type TrainingPlayerAction =
     | 'add'
     | 'remove';
 
 export class TrainingFlowHandler {
-    readonly textStates: readonly AdminFlowState[] = ['waiting_training_add_player', 'waiting_training_remove_player', 'waiting_training_archive_search'];
+    readonly textStates: readonly AdminFlowState[] = ['waiting_training_add_player', 'waiting_training_remove_player', 'waiting_training_reservation_places', 'waiting_training_new_player_name', 'waiting_training_new_player_places', 'waiting_training_new_player_confirmation', 'waiting_training_archive_search'];
     constructor(
         private readonly services: ServicesContext,
         private readonly publisher: TrainingPublisherService,
@@ -39,7 +43,14 @@ export class TrainingFlowHandler {
             ) ||
             callback.startsWith(
                 AdminCallbacks.TrainingSelectRemovePlayerPrefix,
-            )
+            ) ||
+            callback === AdminCallbacks.TrainingNewPlayerPreview ||
+            callback === AdminCallbacks.TrainingNewPlayerEdit ||
+            callback === AdminCallbacks.TrainingNewPlayerSearchAgain ||
+            callback === AdminCallbacks.TrainingNewPlayerPlaces ||
+            callback === AdminCallbacks.TrainingNewPlayerConfirm ||
+            callback === AdminCallbacks.TrainingNewPlayerCreateAnyway ||
+            callback === AdminCallbacks.TrainingNewPlayerCancel
         );
     }
 
@@ -57,6 +68,42 @@ export class TrainingFlowHandler {
             const searchQuery = this.services.adminFlow.getData(adminId).searchQuery ?? '';
             this.services.adminFlow.transition(adminId, 'waiting_training_archive_search', { searchQuery });
             await this.services.adminUi.show(ctx, ['🔎 Пошук в архіві', '', 'Надішліть частину назви або дату.', 'Наприклад: Вечірнє або 2026-08-04', searchQuery ? `Поточний запит: «${searchQuery}»` : ''].filter(Boolean).join('\n'), createFlowNavigationKeyboard(AdminCallbacks.ArchivedTrainings, AdminCallbacks.ActiveTrainings));
+            return;
+        }
+
+        if (callback === AdminCallbacks.TrainingNewPlayerCancel) {
+            const trainingId = this.services.adminFlow.getData(adminId).trainingId;
+            if (!trainingId) throw new Error('Training ID is missing');
+            this.services.adminFlow.reset(adminId);
+            await this.showTrainingCard(ctx, trainingId);
+            return;
+        }
+        if (callback === AdminCallbacks.TrainingNewPlayerEdit) {
+            this.services.adminFlow.transition(adminId, 'waiting_training_new_player_name');
+            await this.services.adminUi.show(ctx, '✏️ Надішліть ім’я нового гравця.', createFlowNavigationKeyboard(AdminCallbacks.TrainingNewPlayerCancel, AdminCallbacks.ActiveTrainings));
+            return;
+        }
+        if (callback === AdminCallbacks.TrainingNewPlayerSearchAgain) {
+            this.services.adminFlow.transition(adminId, 'waiting_training_add_player', { pendingPlayerName: undefined });
+            await this.services.adminUi.show(ctx, '🔎 Надішліть ім’я або його частину.', createFlowNavigationKeyboard(AdminCallbacks.TrainingNewPlayerCancel, AdminCallbacks.ActiveTrainings));
+            return;
+        }
+        if (callback === AdminCallbacks.TrainingNewPlayerPlaces) {
+            this.services.adminFlow.transition(adminId, 'waiting_training_new_player_places');
+            await this.services.adminUi.show(ctx, '👥 Надішліть кількість місць від 1 до 4.', createFlowNavigationKeyboard(AdminCallbacks.TrainingNewPlayerCancel, AdminCallbacks.ActiveTrainings));
+            return;
+        }
+        if (callback === AdminCallbacks.TrainingNewPlayerPreview) {
+            await this.showNewPlayerPreview(ctx, adminId, true);
+            return;
+        }
+        if (callback === AdminCallbacks.TrainingNewPlayerConfirm) {
+            if (await this.showDuplicatesIfAny(ctx, adminId)) return;
+            await this.createNewPlayerAndRegister(ctx, adminId);
+            return;
+        }
+        if (callback === AdminCallbacks.TrainingNewPlayerCreateAnyway) {
+            await this.createNewPlayerAndRegister(ctx, adminId);
             return;
         }
 
@@ -139,6 +186,10 @@ export class TrainingFlowHandler {
             'waiting_training_add_player' ||
             state ===
             'waiting_training_remove_player' ||
+            state === 'waiting_training_reservation_places' ||
+            state === 'waiting_training_new_player_name' ||
+            state === 'waiting_training_new_player_places' ||
+            state === 'waiting_training_new_player_confirmation' ||
             state === 'waiting_training_archive_search'
         );
     }
@@ -158,7 +209,48 @@ export class TrainingFlowHandler {
                 adminId,
             );
 
-        if (this.services.adminFlow.getState(adminId) === 'waiting_training_archive_search') {
+        const state = this.services.adminFlow.getState(adminId);
+        if (state === 'waiting_training_new_player_confirmation') {
+            await this.services.adminUi.notice(ctx, 'Скористайтеся кнопками під попереднім переглядом.');
+            return;
+        }
+        if (state === 'waiting_training_new_player_name') {
+            const name = text.trim().replace(/\s+/g, ' ');
+            if (name.length < 2 || name.length > 100) {
+                await this.services.adminUi.replaceWithError(ctx, 'Ім’я має містити від 2 до 100 символів. Надішліть інше ім’я.', createFlowNavigationKeyboard(AdminCallbacks.TrainingNewPlayerCancel, AdminCallbacks.ActiveTrainings));
+                return;
+            }
+            this.services.adminFlow.setData(adminId, { pendingPlayerName: name });
+            await this.showNewPlayerPreview(ctx, adminId, true);
+            return;
+        }
+        if (state === 'waiting_training_new_player_places') {
+            try {
+                const places = Number(text.trim());
+                validateReservedPlaces(places);
+                this.services.adminFlow.setData(adminId, { newTrainingPlayerPlaces: places });
+                await this.showNewPlayerPreview(ctx, adminId, false);
+            } catch (error) {
+                await this.services.adminUi.replaceWithError(ctx, `${this.errorMessage(error)}\n\nНадішліть число від 1 до 4.`, createFlowNavigationKeyboard(AdminCallbacks.TrainingNewPlayerCancel, AdminCallbacks.ActiveTrainings));
+            }
+            return;
+        }
+
+        if (state === 'waiting_training_reservation_places') {
+            const places = Number(text.trim());
+            try {
+                validateReservedPlaces(places);
+                if (!data.trainingId || !data.playerId) throw new Error('Дані вибору застаріли');
+                const action = data.reservationAction ?? 'add';
+                await this.apply(data.trainingId, data.playerId, action, places);
+                await this.showCompleted(ctx, adminId, data.trainingId);
+            } catch (error) {
+                await this.services.adminUi.replaceWithError(ctx, `${this.errorMessage(error)}\n\nНадішліть число від 1 до 4.`, createFlowNavigationKeyboard(`${AdminCallbacks.TrainingPrefix}${data.trainingId}`, AdminCallbacks.ActiveTrainings));
+            }
+            return;
+        }
+
+        if (state === 'waiting_training_archive_search') {
             this.services.adminFlow.setData(adminId, { searchQuery: text });
             const trainings = await this.services.repositories.trainings.listArchived({ query: text });
             trainings.sort((first, second) => second.date.localeCompare(first.date) || second.startTime.localeCompare(first.startTime));
@@ -183,13 +275,9 @@ export class TrainingFlowHandler {
                 ? 'add'
                 : 'remove';
 
-        let players = await this.services.players.search(text, 10);
+        let players = await this.services.players.search(text, 10, { includeInactive: true });
 
-        if (action === 'add') {
-            players = players.filter(
-                (player) => player.isActive,
-            );
-        } else {
+        if (action === 'remove') {
             const training =
                 await this.services.trainings.getRequired(
                     data.trainingId,
@@ -210,45 +298,20 @@ export class TrainingFlowHandler {
         }
 
         if (players.length === 0) {
-            await this.services.adminUi.replaceWithError(
-                ctx,
-                'Гравців за таким запитом не знайдено',
-                createFlowNavigationKeyboard(`${AdminCallbacks.TrainingPrefix}${data.trainingId}`, AdminCallbacks.ActiveTrainings),
-            );
+            if (action === 'remove') {
+                await this.services.adminUi.replaceWithError(ctx, 'Гравців за таким запитом не знайдено', createFlowNavigationKeyboard(`${AdminCallbacks.TrainingPrefix}${data.trainingId}`, AdminCallbacks.ActiveTrainings));
+                return;
+            }
+            const name = text.trim().replace(/\s+/g, ' ');
+            this.services.adminFlow.transition(adminId, 'waiting_training_new_player_confirmation', { pendingPlayerName: name, newTrainingPlayerPlaces: 1 });
+            await this.services.adminUi.show(ctx, `🔎 Гравця «${name}» не знайдено.\n\nДодати його як нового гравця?`, createUnknownTrainingPlayerKeyboard());
             return;
         }
 
         if (players.length === 1) {
             const player = players[0];
 
-            try {
-                await this.apply(data.trainingId, player.id, action);
-            } catch (error) {
-                await this.services.adminUi.replaceWithError(ctx, `${this.errorMessage(error)}\n\nВведіть інше імʼя або поверніться назад.`, createFlowNavigationKeyboard(`${AdminCallbacks.TrainingPrefix}${data.trainingId}`, AdminCallbacks.ActiveTrainings));
-                return;
-            }
-
-            const training =
-                await this.services.trainings.getRequired(
-                    data.trainingId,
-                );
-            const card = await this.renderResolvedCard(training);
-
-            this.services.adminFlow.reset(
-                adminId,
-            );
-
-            await this.services.adminUi.replaceWithSuccess(
-                ctx,
-                [
-                    action === 'add'
-                        ? `${player.displayName} додано`
-                        : `${player.displayName} прибрано`,
-                    '',
-                    card.text,
-                ].join('\n'),
-                createTrainingKeyboard(training, card.truncated),
-            );
+            await this.askReservedPlaces(ctx, adminId, data.trainingId, player.id, player.displayName, action);
             return;
         }
 
@@ -291,34 +354,16 @@ export class TrainingFlowHandler {
             );
         }
 
-        try {
-            await this.apply(trainingId, playerId, action);
-        } catch (error) {
-            await this.services.adminUi.replaceWithError(ctx, `${this.errorMessage(error)}\n\nОберіть іншого гравця або поверніться назад.`, createFlowNavigationKeyboard(`${AdminCallbacks.TrainingPrefix}${trainingId}`, AdminCallbacks.ActiveTrainings));
-            return;
-        }
-
-        const training =
-            await this.services.trainings.getRequired(
-                trainingId,
-            );
-        const card = await this.renderResolvedCard(training);
-
-        this.services.adminFlow.reset(
-            adminId,
-        );
-
-        await this.services.adminUi.replaceWithSuccess(
-            ctx,
-            card.text,
-            createTrainingKeyboard(training, card.truncated),
-        );
+        const player = await this.services.repositories.players.findById(playerId);
+        if (!player) throw new Error(`Player ${playerId} not found`);
+        await this.askReservedPlaces(ctx, adminId, trainingId, player.id, player.displayName, action);
     }
 
     private async apply(
         trainingId: string,
         playerId: string,
         action: TrainingPlayerAction,
+        places = 1,
     ): Promise<void> {
         if (action === 'add') {
             const player =
@@ -339,7 +384,7 @@ export class TrainingFlowHandler {
                     displayName: player.displayName,
                     telegramUserId:
                     player.telegramUserId,
-                    places: 1,
+                    places,
                     source: 'admin',
                     overrideState: true,
                 });
@@ -348,12 +393,71 @@ export class TrainingFlowHandler {
         }
 
         const training =
-            await this.services.trainingParticipants.removeParticipantCompletely({
+            await this.services.trainingParticipants.removeParticipant({
                 trainingId,
                 playerId,
+                requestedPlacesToRemove: places,
                 overrideState: true,
             });
 
+    }
+
+    private async askReservedPlaces(ctx: Context, adminId: number, trainingId: string, playerId: string, playerName: string, action: TrainingPlayerAction): Promise<void> {
+        this.services.adminFlow.transition(adminId, 'waiting_training_reservation_places', { trainingId, playerId, reservationAction: action });
+        await this.services.adminUi.show(ctx, `${action === 'add' ? '➕' : '➖'} ${playerName}\n\nСкільки місць ${action === 'add' ? 'зарезервувати' : 'скасувати'}? Надішліть число від 1 до 4.`, createFlowNavigationKeyboard(`${AdminCallbacks.TrainingPrefix}${trainingId}`, AdminCallbacks.ActiveTrainings));
+    }
+
+    private async showCompleted(ctx: Context, adminId: number, trainingId: string): Promise<void> {
+        await this.publisher.refreshMessage(trainingId);
+        const training = await this.services.trainings.getRequired(trainingId);
+        const card = await this.renderResolvedCard(training);
+        this.services.adminFlow.reset(adminId);
+        await this.services.adminUi.showTrainingCard(ctx, training.id, card.text, createTrainingKeyboard(training, card.truncated));
+    }
+
+    private async showNewPlayerPreview(ctx: Context, adminId: number, checkDuplicates: boolean): Promise<void> {
+        const data = this.services.adminFlow.getData(adminId);
+        if (!data.trainingId || !data.pendingPlayerName) throw new Error('New player flow data is missing');
+        if (checkDuplicates && await this.showDuplicatesIfAny(ctx, adminId)) return;
+        const training = await this.services.trainings.getRequired(data.trainingId);
+        const places = data.newTrainingPlayerPlaces ?? 1;
+        this.services.adminFlow.transition(adminId, 'waiting_training_new_player_confirmation', { newTrainingPlayerPlaces: places });
+        await this.services.adminUi.show(ctx, [
+            '👤 Новий гравець', '', 'Ім’я:', data.pendingPlayerName, '', 'Тренування:', training.title,
+            `${formatDate(training.date)}, ${formatTimeRange(training.startTime, training.endTime)}`, '', 'Кількість місць:', String(places),
+        ].join('\n'), createNewTrainingPlayerPreviewKeyboard());
+    }
+
+    private async showDuplicatesIfAny(ctx: Context, adminId: number): Promise<boolean> {
+        const data = this.services.adminFlow.getData(adminId);
+        if (!data.pendingPlayerName) throw new Error('New player name is missing');
+        const duplicates = await this.services.players.findLikelyDuplicates(data.pendingPlayerName);
+        if (!duplicates.length) return false;
+        await this.services.adminUi.show(ctx, ['Можливо, це вже наявний гравець:', '', ...duplicates.slice(0, 10).map((player, index) => `${index + 1}. ${player.displayName}`)].join('\n'), createTrainingPlayerDuplicateKeyboard(duplicates));
+        return true;
+    }
+
+    private async createNewPlayerAndRegister(ctx: Context, adminId: number): Promise<void> {
+        const data = this.services.adminFlow.getData(adminId);
+        if (!data.trainingId || !data.pendingPlayerName) throw new Error('New player flow data is missing');
+        try {
+            await this.services.trainingPlayerCreation.createPlayerAndAddToTraining({
+                clubId: this.services.repositories.clubId,
+                trainingId: data.trainingId,
+                displayName: data.pendingPlayerName,
+                places: data.newTrainingPlayerPlaces ?? 1,
+                createdByTelegramId: adminId,
+            });
+            await this.showCompleted(ctx, adminId, data.trainingId);
+        } catch (error) {
+            await this.services.adminUi.replaceWithError(ctx, this.errorMessage(error), createNewTrainingPlayerPreviewKeyboard());
+        }
+    }
+
+    private async showTrainingCard(ctx: Context, trainingId: string): Promise<void> {
+        const training = await this.services.trainings.getRequired(trainingId);
+        const card = await this.renderResolvedCard(training);
+        await this.services.adminUi.showTrainingCard(ctx, training.id, card.text, createTrainingKeyboard(training, card.truncated));
     }
 
     private errorMessage(error: unknown): string {

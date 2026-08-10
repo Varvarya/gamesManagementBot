@@ -2,6 +2,7 @@ import { PlayerService } from '../players/player.service';
 import { TrainingService } from './training.service';
 import { ParticipantMutation, TrainingParticipantsService } from './training-participants.service';
 import { Training } from './training.types';
+import { validateReservedPlaces } from './reserved-places';
 
 type TelegramUserInput = { id: number; first_name?: string; username?: string };
 export type RegistrationActionInput = {
@@ -22,6 +23,7 @@ export class RegistrationService {
     ) {}
 
     async registerDetailed(input: RegistrationActionInput): Promise<ParticipantMutation> {
+        validateReservedPlaces(input.places);
         const training = await this.resolveOpenTraining(input);
         const player = input.playerName
             ? await this.players.findOrCreateByName(input.playerName)
@@ -41,11 +43,12 @@ export class RegistrationService {
     }
 
     async unregisterDetailed(input: RegistrationActionInput): Promise<ParticipantMutation> {
+        validateReservedPlaces(input.places);
         const training = await this.resolveOpenTraining(input);
         const player = input.playerName
             ? await this.players.findOrCreateByName(input.playerName)
             : await this.players.findOrCreateByTelegramUser(input.telegramUser);
-        return this.participants.removeParticipant({ trainingId: training.id, playerId: player.id });
+        return this.participants.removeParticipant({ trainingId: training.id, playerId: player.id, requestedPlacesToRemove: input.places });
     }
 
     async unregister(input: RegistrationActionInput): Promise<Training> {

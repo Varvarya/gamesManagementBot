@@ -1,4 +1,4 @@
-import { Telegraf } from 'telegraf';
+import { Context, Telegraf } from 'telegraf';
 
 import { AdminCallbackRouter } from '../bot/admin/admin-callback-router';
 import { AdminTextRouter } from '../bot/admin/admin-text-router';
@@ -13,6 +13,7 @@ import { AdminSettingsHandler } from '../bot/admin/handlers/admin-settings.handl
 import { AdminTemplateHandler } from '../bot/admin/handlers/admin-template.handler';
 import { AdminTrainingHandler } from '../bot/admin/handlers/admin-training.handler';
 import { AdminChatHandler } from '../bot/admin/handlers/admin-chat.handler';
+import { AdminCallbacks } from '../bot/admin/callbacks/admin-callbacks';
 
 import { GroupRegistrationHandler } from '../bot/handlers/group-registration.handler';
 import { SuperAdminConfigHandler } from '../bot/handlers/super-admin-config.handler';
@@ -32,6 +33,15 @@ import { BackupService } from '../storage/backup.service';
 import { waitForPendingWrites } from '../storage/atomicWrite';
 import { logger } from '../utils/logger';
 import { resolveClubStorage } from '../storage/clubStorageResolver';
+import path from 'node:path';
+import { ClubRepository } from '../storage/repositories/club.repository';
+import { ClubCreationRequestRepository } from '../storage/repositories/club-creation-request.repository';
+import { ClubManagementHandler } from '../bot/handlers/club-management.handler';
+import { CallbackAuthorizationService } from '../bot/authorization/callback-authorization.service';
+import { SessionContextService } from '../bot/session/session-context.service';
+import { ClubHealthService } from '../domain/clubs/club-health.service';
+import { AdminNavigationService } from '../bot/navigation/admin-navigation.service';
+import { ClubContextManager, ClubRuntimeContext } from './club-context-manager';
 
 
 type ApplicationContextOptions = {
@@ -41,6 +51,18 @@ type ApplicationContextOptions = {
     clubName?: string;
     superAdminIds: number[];
     defaultTimezone: string;
+};
+
+type ClubHandlerRuntime = {
+    context: ClubRuntimeContext;
+    publisher: TrainingPublisherService;
+    templateScheduler: TemplateSchedulerService;
+    cancellationScheduler: TrainingCancellationScheduler;
+    menu: AdminMenuHandler;
+    callbackRouter: AdminCallbackRouter;
+    textRouter: AdminTextRouter;
+    groupRegistration: GroupRegistrationHandler;
+    superAdminConfig: SuperAdminConfigHandler;
 };
 
 export class ApplicationContext {
@@ -53,12 +75,22 @@ export class ApplicationContext {
     readonly templateScheduler: TemplateSchedulerService;
     readonly superAdminConfig: SuperAdminConfigService;
     readonly backups: BackupService;
+    readonly clubs: ClubRepository;
+    readonly clubCreationRequests: ClubCreationRequestRepository;
+    readonly callbackAuthorization: CallbackAuthorizationService;
+    readonly sessionContexts: SessionContextService;
+    readonly clubHealth: ClubHealthService;
+    readonly navigation: AdminNavigationService;
+    readonly clubContexts: ClubContextManager;
 
     readonly trainingCancellationScheduler: TrainingCancellationScheduler;
 
     private readonly superAdminIds: number[];
     private isShuttingDown = false;
     private handlersRegistered = false;
+    private readonly clubRuntimes = new Map<string, Promise<ClubHandlerRuntime>>();
+    private readonly dataDir: string;
+    private readonly defaultTimezone: string;
 
     private constructor(
         options: ApplicationContextOptions,
@@ -67,9 +99,11 @@ export class ApplicationContext {
     ) {
         this.storage = storage;
         this.repositories = repositories;
+        this.sessionContexts = new SessionContextService();
 
         this.services = new ServicesContext(
             this.repositories,
+            this.sessionContexts,
         );
 
         this.bot = new Telegraf(
@@ -86,6 +120,7 @@ export class ApplicationContext {
 
         this.services.trainings.setOnChanged(
             async (training) => {
+                await this.clubs.touchActivity(this.repositories.clubId);
                 await this.trainingPublisher.refreshMessage(training.id);
                 await this.services.adminUi.refreshTrainingCards(training.id);
             },
@@ -100,6 +135,7 @@ export class ApplicationContext {
 
         this.trainingPublisher.setOnPublished(
             async (training) => {
+                await this.clubs.recordSuccessfulPublication(this.repositories.clubId);
                 await this.trainingCancellationScheduler.schedule(
                     training,
                 );
@@ -125,6 +161,17 @@ export class ApplicationContext {
 
         this.superAdminIds =
             options.superAdminIds;
+        this.dataDir = options.dataDir;
+        this.defaultTimezone = options.defaultTimezone;
+        this.clubs = new ClubRepository(options.dataDir, options.defaultTimezone);
+        this.clubCreationRequests = new ClubCreationRequestRepository(path.join(options.dataDir, '_system', 'club-creation-requests.json'));
+        this.clubContexts = new ClubContextManager(options.dataDir, options.defaultTimezone, this.clubs, this.sessionContexts);
+        this.clubContexts.registerClubContext({ clubId: repositories.clubId, storageSlug: path.basename(storage.getDirectoryPath()), directoryPath: storage.getDirectoryPath(), repositories, services: this.services });
+        this.clubHealth = new ClubHealthService(this.clubs, options.dataDir, Number(process.env.CLUB_INACTIVE_DAYS ?? 30), this.clubContexts);
+        this.navigation = new AdminNavigationService(this.sessionContexts, this.services.adminUi, this.services.adminFlow);
+        this.callbackAuthorization = new CallbackAuthorizationService(this.clubs, this.clubCreationRequests, this.superAdminIds, this.sessionContexts);
+        this.services.chats.setOnChanged(async () => { await this.clubs.touchActivity(this.repositories.clubId); });
+        this.services.templates.setOnChanged(async () => { await this.clubs.touchActivity(this.repositories.clubId); });
     }
 
     static async create(
@@ -136,24 +183,32 @@ export class ApplicationContext {
         const repositories = new RepositoriesContext(storage, options.defaultTimezone, resolved);
         await repositories.loadAll();
         const application = new ApplicationContext(options, storage, repositories);
+        await application.clubCreationRequests.load();
+        await application.clubs.registerExisting(await repositories.settings.get());
 
         return application;
     }
 
     async start(): Promise<void> {
-        logger.info('application.scheduler_restore_started');
-
-        await this.restoreScheduler();
-        await this.trainingCancellationScheduler.restore();
-
-        logger.info('application.scheduler_restored');
         this.registerHandlers();
         logger.info('application.bot_launch_started');
+
+        // Connectivity is validated before any scheduler reconciliation. In
+        // particular, an overdue minimum check cannot cancel a training while
+        // the application is only half started.
+        await this.bot.telegram.getMe();
+        await this.bot.telegram.setMyCommands([
+            { command: 'start', description: 'Почати' },
+            { command: 'help', description: 'Допомога' },
+        ]);
 
         await this.bot.launch({
             dropPendingUpdates: true,
         });
 
+        logger.info('application.scheduler_restore_started');
+        await this.restoreScheduler();
+        logger.info('application.scheduler_restored');
         logger.info('application.bot_started');
     }
 
@@ -162,6 +217,11 @@ export class ApplicationContext {
         this.isShuttingDown = true;
         this.services.scheduler.cancelAll();
         this.trainingCancellationScheduler.cancelAll();
+        for (const runtimePromise of this.clubRuntimes.values()) {
+            const runtime = await runtimePromise.catch(() => undefined);
+            runtime?.context.services.scheduler.cancelAll();
+            runtime?.cancellationScheduler.cancelAll();
+        }
 
         this.bot.stop(signal);
         await waitForPendingWrites();
@@ -203,7 +263,30 @@ export class ApplicationContext {
         const adminMenuHandler =
             new AdminMenuHandler(
                 this.services,
+                this.superAdminIds,
+                this.sessionContexts,
             );
+
+        const clubManagementHandler = new ClubManagementHandler(
+            this.bot,
+            this.clubs,
+            this.clubCreationRequests,
+            this.superAdminIds,
+            this.callbackAuthorization,
+            this.sessionContexts,
+            this.clubHealth,
+            this.navigation,
+            async (ctx) => {
+                const selectedClubId = ctx.from ? this.sessionContexts.get(ctx.from.id)?.activeClubId : undefined;
+                if (!selectedClubId) throw new Error('No active club selected');
+                try { await (await this.getClubRuntime(selectedClubId)).menu.showMain(ctx); }
+                catch (error) {
+                    logger.error('club.context_activation_failed', { clubId: selectedClubId, reason: error instanceof Error ? error.message : String(error) });
+                    await ctx.reply('⚠️ Не вдалося завантажити дані обраного клубу. Дані іншого клубу не показано.');
+                }
+            },
+            (clubId) => this.invalidateClubRuntime(clubId),
+        );
 
         const adminTrainingHandler =
             new AdminTrainingHandler(
@@ -251,6 +334,10 @@ export class ApplicationContext {
         const adminCallbackRouter =
             new AdminCallbackRouter(
                 this.services,
+                this.callbackAuthorization,
+                this.repositories.clubId,
+                this.sessionContexts,
+                this.navigation,
 
                 templateFlowHandler,
                 playerFlowHandler,
@@ -270,56 +357,61 @@ export class ApplicationContext {
                 [adminChatHandler, settingsFlowHandler, superAdminConfigHandler],
                 [templateFlowHandler, playerFlowHandler, trainingFlowHandler, settingsFlowHandler],
                 this.superAdminIds,
+                this.callbackAuthorization,
+                this.repositories.clubId,
+                this.sessionContexts,
             );
 
         this.bot.start(
             async (ctx) => {
-                await adminMenuHandler.showMain(
-                    ctx,
-                );
+                if (await clubManagementHandler.handleStart(ctx)) return;
+                const clubId = ctx.from ? this.sessionContexts.get(ctx.from.id)?.activeClubId : undefined;
+                if (clubId) await (await this.getClubRuntime(clubId)).menu.showMain(ctx);
             },
         );
 
         this.bot.command(
             'admin',
             async (ctx) => {
-                await adminMenuHandler.showMain(ctx);
+                if (await clubManagementHandler.handleStart(ctx)) return;
+                const clubId = ctx.from ? this.sessionContexts.get(ctx.from.id)?.activeClubId : undefined;
+                if (clubId) await (await this.getClubRuntime(clubId)).menu.showMain(ctx);
             },
         );
+
+        this.bot.help(async (ctx) => {
+            if (await clubManagementHandler.handleStart(ctx)) return;
+            const clubId = ctx.from ? this.sessionContexts.get(ctx.from.id)?.activeClubId : undefined;
+            if (clubId) await (await this.getClubRuntime(clubId)).menu.handle(ctx, AdminCallbacks.Help);
+        });
 
         this.bot.command(
             'import',
             async (ctx) => {
-                await superAdminConfigHandler.startImport(
-                    ctx,
-                );
+                const runtime = await this.getSelectedClubRuntime(ctx);
+                if (runtime) await runtime.superAdminConfig.startImport(ctx);
             },
         );
 
         this.bot.command(
             'export',
             async (ctx) => {
-                await superAdminConfigHandler.exportConfig(
-                    ctx,
-                );
+                const runtime = await this.getSelectedClubRuntime(ctx);
+                if (runtime) await runtime.superAdminConfig.exportConfig(ctx);
             },
         );
-        this.bot.command('backup', async (ctx) => { await superAdminConfigHandler.createBackup(ctx); });
+        this.bot.command('backup', async (ctx) => { const runtime = await this.getSelectedClubRuntime(ctx); if (runtime) await runtime.superAdminConfig.createBackup(ctx); });
 
         this.bot.on(
             'callback_query',
             async (ctx) => {
-                if (
-                    await superAdminConfigHandler.handleCallback(
-                        ctx,
-                    )
-                ) {
-                    return;
-                }
+                if (await clubManagementHandler.handleCallback(ctx)) return;
+                const configRuntime = await this.getSelectedClubRuntime(ctx, false);
+                if (configRuntime && await configRuntime.superAdminConfig.handleCallback(ctx)) return;
 
-                await adminCallbackRouter.handle(
-                    ctx,
-                );
+                const clubId = ctx.from ? this.sessionContexts.get(ctx.from.id)?.activeClubId : undefined;
+                if (!clubId) { await ctx.answerCbQuery('⚠️ Це меню вже неактивне.'); return; }
+                await (await this.getClubRuntime(clubId)).callbackRouter.handle(ctx);
             },
         );
 
@@ -329,16 +421,15 @@ export class ApplicationContext {
                 if (
                     ctx.chat.type === 'private'
                 ) {
-                    await adminTextRouter.handle(
-                        ctx,
-                    );
+                    if (await clubManagementHandler.handleMessage(ctx)) return;
+                    const clubId = ctx.from ? this.sessionContexts.get(ctx.from.id)?.activeClubId : undefined;
+                    if (clubId) await (await this.getClubRuntime(clubId)).textRouter.handle(ctx);
 
                     return;
                 }
 
-                await groupRegistrationHandler.handle(
-                    ctx,
-                );
+                const runtime = await this.findRuntimeForChat(ctx.chat.id);
+                if (runtime) await runtime.groupRegistration.handle(ctx);
             },
         );
 
@@ -356,14 +447,99 @@ export class ApplicationContext {
     }
 
     private async restoreScheduler(): Promise<void> {
-        const templates =
-            await this.repositories.templates.listEnabled();
+        for (const club of await this.clubs.findAll()) {
+            if (club.status === 'disabled') continue;
+            try {
+                const runtime = await this.getClubRuntime(club.id);
+                const templates = await runtime.context.repositories.templates.listEnabled();
+                const restoredJobCount = await runtime.templateScheduler.restore(templates);
+                await runtime.cancellationScheduler.restore({ reconcileOverdue: false });
+                const expectedJobCount = templates.reduce((count, template) => count + template.slots.filter((slot) => slot.enabled).length, 0);
+                await this.clubs.recordSchedulerRestore(club.id, expectedJobCount, restoredJobCount);
+                logger.info('scheduler.restore_completed', { clubId: club.id, restoredJobCount });
+            } catch (error) {
+                logger.error('scheduler.restore_failed', { clubId: club.id, reason: error instanceof Error ? error.message : String(error) });
+            }
+        }
+    }
 
-        const restoredJobCount =
-            await this.templateScheduler.restore(
-            templates,
-        );
+    private async getClubRuntime(clubId: string): Promise<ClubHandlerRuntime> {
+        const existing = this.clubRuntimes.get(clubId);
+        if (existing) return existing;
+        const loading = this.clubContexts.getClubContext(clubId).then((context) => this.createClubRuntime(context));
+        this.clubRuntimes.set(clubId, loading);
+        try { return await loading; }
+        catch (error) {
+            if (this.clubRuntimes.get(clubId) === loading) this.clubRuntimes.delete(clubId);
+            throw error;
+        }
+    }
 
-        logger.info('scheduler.restore_completed', { restoredJobCount });
+    private invalidateClubRuntime(clubId: string): void {
+        void this.clubRuntimes.get(clubId)?.then((runtime) => {
+            runtime.context.services.scheduler.cancelAll();
+            runtime.cancellationScheduler.cancelAll();
+        }).catch(() => undefined);
+        this.clubRuntimes.delete(clubId);
+        this.clubContexts.invalidateClubContext(clubId);
+    }
+
+    private createClubRuntime(context: ClubRuntimeContext): ClubHandlerRuntime {
+        const { repositories, services } = context;
+        const publisher = new TrainingPublisherService(this.bot.telegram, repositories, services.trainings, services.trainingMessageRenderer);
+        const cancellationScheduler = new TrainingCancellationScheduler(repositories, services.trainings, publisher);
+        const templateScheduler = new TemplateSchedulerService(services.templates, services.scheduler, publisher, services.chats, repositories.settings);
+        const storage = new JsonStorage({ dataDir: this.dataDir, storageSlug: context.storageSlug });
+        const backups = new BackupService(storage, 5);
+        const navigation = new AdminNavigationService(this.sessionContexts, services.adminUi, services.adminFlow);
+
+        services.trainings.setOnChanged(async (training) => {
+            await this.clubs.touchActivity(context.clubId);
+            await publisher.refreshMessage(training.id);
+            await services.adminUi.refreshTrainingCards(training.id);
+        });
+        publisher.setOnPublished(async (training) => {
+            await this.clubs.recordSuccessfulPublication(context.clubId);
+            await cancellationScheduler.schedule(training);
+        });
+        services.chats.setOnChanged(async () => { await this.clubs.touchActivity(context.clubId); });
+        services.templates.setOnChanged(async () => { await this.clubs.touchActivity(context.clubId); });
+
+        const templateFlow = new TemplateFlowHandler(services, templateScheduler);
+        const playerFlow = new PlayerFlowHandler(services, publisher);
+        const trainingFlow = new TrainingFlowHandler(services, publisher);
+        const menu = new AdminMenuHandler(services, this.superAdminIds, this.sessionContexts);
+        const training = new AdminTrainingHandler(services, publisher);
+        const player = new AdminPlayerHandler(services);
+        const template = new AdminTemplateHandler(services, templateScheduler);
+        const settings = new AdminSettingsHandler(services, cancellationScheduler, backups, templateScheduler);
+        const chat = new AdminChatHandler(services);
+        const settingsFlow = new SettingsFlowHandler(services, settings);
+        const configService = new SuperAdminConfigService(repositories, templateScheduler, backups);
+        const superAdminConfig = new SuperAdminConfigHandler(services, configService, [...this.superAdminIds]);
+        const callbackRouter = new AdminCallbackRouter(services, this.callbackAuthorization, context.clubId, this.sessionContexts, navigation, templateFlow, playerFlow, trainingFlow, menu, training, player, template, chat, settings);
+        const textRouter = new AdminTextRouter(services, [chat, settingsFlow, superAdminConfig], [templateFlow, playerFlow, trainingFlow, settingsFlow], this.superAdminIds, this.callbackAuthorization, context.clubId, this.sessionContexts);
+        const groupRegistration = new GroupRegistrationHandler(services, publisher);
+        return { context, publisher, templateScheduler, cancellationScheduler, menu, callbackRouter, textRouter, groupRegistration, superAdminConfig };
+    }
+
+    private async findRuntimeForChat(chatId: number): Promise<ClubHandlerRuntime | undefined> {
+        for (const club of await this.clubs.findAll()) {
+            if (club.status === 'disabled') continue;
+            try {
+                const runtime = await this.getClubRuntime(club.id);
+                if (await runtime.context.repositories.chats.getById(chatId)) return runtime;
+            } catch { /* A broken club must not block another club's group update. */ }
+        }
+        return undefined;
+    }
+
+    private async getSelectedClubRuntime(ctx: Context, notify = true): Promise<ClubHandlerRuntime | undefined> {
+        const clubId = ctx.from ? this.sessionContexts.get(ctx.from.id)?.activeClubId : undefined;
+        if (!clubId) {
+            if (notify) await ctx.reply('Спочатку відкрийте потрібний клуб.');
+            return undefined;
+        }
+        return this.getClubRuntime(clubId);
     }
 }

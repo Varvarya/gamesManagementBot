@@ -2,6 +2,7 @@ import { Context, Markup } from 'telegraf';
 import { InlineKeyboardMarkup } from 'telegraf/types';
 import { logger } from '../../../utils/logger';
 import { isTelegramMessageNotModified, isTelegramMessageUnavailable } from '../../../utils/telegramEditErrors';
+import { SessionContextService } from '../../session/session-context.service';
 
 export type AdminKeyboard =
     Markup.Markup<InlineKeyboardMarkup>;
@@ -18,14 +19,18 @@ export class AdminUi {
     private readonly trainingCards = new Map<string, Map<string, { telegram: Context['telegram']; chatId: number; messageId: number }>>();
     private trainingCardRenderer?: (trainingId: string) => Promise<{ text: string; keyboard?: AdminKeyboard }>;
 
+    constructor(private readonly navigationSessions?: SessionContextService) {}
+
     trackUserMessage(adminId: number, chatId: number, messageId: number): void {
         const session = this.getSession(adminId, chatId);
         if (session) session.userMessageIds.add(messageId);
+        this.navigationSessions?.trackTemporaryUserMessage(adminId, messageId);
     }
 
     trackBotMessage(adminId: number, chatId: number, messageId: number): void {
         const session = this.getSession(adminId, chatId);
         if (session) session.botMessageIds.add(messageId);
+        this.navigationSessions?.trackUiMessage(adminId, messageId);
     }
 
     setRootMessage(adminId: number, chatId: number, messageId: number): void {
@@ -33,6 +38,7 @@ export class AdminUi {
         if (!session) return;
         session.botMessageIds.add(messageId);
         session.rootMessageId = messageId;
+        this.navigationSessions?.trackUiMessage(adminId, messageId, true);
     }
 
     async show(
@@ -155,6 +161,22 @@ export class AdminUi {
         return preservedRootId;
     }
 
+    /** Hard mode boundary: delete all owned UI and never preserve the previous root. */
+    async hardReset(ctx: Context): Promise<void> {
+        if (ctx.chat?.type !== 'private' || !ctx.from) return;
+        const session = this.sessions.get(ctx.from.id);
+        const state = this.navigationSessions?.get(ctx.from.id);
+        const targets = new Set<number>([
+            ...(session ? [...session.userMessageIds, ...session.botMessageIds] : []),
+            ...(state?.trackedUiMessageIds ?? []),
+            ...(state?.temporaryUserMessageIds ?? []),
+        ]);
+        if (ctx.callbackQuery && 'message' in ctx.callbackQuery && ctx.callbackQuery.message?.message_id) targets.add(ctx.callbackQuery.message.message_id);
+        for (const messageId of targets) await this.deleteTracked(ctx, ctx.chat.id, messageId);
+        this.sessions.delete(ctx.from.id);
+        this.navigationSessions?.clearTrackedMessages(ctx.from.id);
+    }
+
     async showRootMenu(ctx: Context, text: string, keyboard?: AdminKeyboard): Promise<void> {
         if (ctx.chat?.type !== 'private' || !ctx.from) {
             await this.show(ctx, text, keyboard);
@@ -180,6 +202,18 @@ export class AdminUi {
         const message = await ctx.reply(text, keyboard);
         const messageId = this.getMessageId(message);
         if (messageId !== undefined) this.setRootMessage(ctx.from.id, ctx.chat.id, messageId);
+    }
+
+    async showFreshRoot(ctx: Context, text: string, keyboard?: AdminKeyboard): Promise<void> {
+        if (ctx.chat?.type !== 'private' || !ctx.from) { await this.show(ctx, text, keyboard); return; }
+        const message = await ctx.reply(text, keyboard);
+        const messageId = this.getMessageId(message);
+        if (messageId !== undefined) this.setRootMessage(ctx.from.id, ctx.chat.id, messageId);
+    }
+
+    async showFresh(ctx: Context, text: string, keyboard?: AdminKeyboard): Promise<void> {
+        const message = await ctx.reply(text, keyboard);
+        this.trackReply(ctx, message);
     }
 
     private getSession(adminId: number, chatId: number): AdminUiSession | undefined {

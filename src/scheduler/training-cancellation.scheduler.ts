@@ -14,18 +14,18 @@ export class TrainingCancellationScheduler {
         private readonly publisher: TrainingPublisherService,
     ) {}
 
-    async restore(): Promise<void> {
+    async restore(options: { reconcileOverdue?: boolean } = {}): Promise<void> {
         this.cancelAll();
 
         const activeTrainings =
             await this.repositories.trainings.listActive();
 
         for (const training of activeTrainings) {
-            await this.schedule(training);
+            await this.schedule(training, options);
         }
     }
 
-    async schedule(training: Training): Promise<void> {
+    async schedule(training: Training, options: { reconcileOverdue?: boolean } = { reconcileOverdue: true }): Promise<void> {
         this.cancel(training.id);
 
         if (
@@ -43,7 +43,14 @@ export class TrainingCancellationScheduler {
         const checkAt = this.getCheckDate(training, hoursBefore ?? 4);
 
         if (checkAt.getTime() <= Date.now()) {
-            await this.check(training.id);
+            // Startup restore must never turn an overdue job into a destructive
+            // cancellation. An explicit live reschedule may reconcile it.
+            if (options.reconcileOverdue) await this.check(training.id);
+            else logger.warn('scheduler.overdue_cancellation_requires_reconciliation', {
+                clubId: this.repositories.clubId,
+                trainingId: training.id,
+                checkAt: checkAt.toISOString(),
+            });
             return;
         }
 

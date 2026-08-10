@@ -10,6 +10,7 @@ import {
 import { logger } from '../../utils/logger';
 
 export class ChatService {
+    private onChanged?: () => Promise<void>;
     constructor(
         private readonly repository: ChatsRepository,
     ) {}
@@ -69,6 +70,7 @@ export class ChatService {
         this.validateInput(input);
 
         const chat = await this.repository.create(input);
+        await this.onChanged?.();
         logger.info('chat.created', { chatId: chat.id, enabled: chat.enabled });
         return chat;
     }
@@ -87,6 +89,7 @@ export class ChatService {
         }
 
         const chat = await this.repository.update(id, input);
+        await this.onChanged?.();
         logger.info('chat.updated', { chatId: id, changedFields: Object.keys(input) });
         return chat;
     }
@@ -97,6 +100,7 @@ export class ChatService {
         this.validateInput(input);
 
         const chat = await this.repository.upsert(input);
+        await this.onChanged?.();
         logger.info('chat.upserted', { chatId: chat.id, enabled: chat.enabled });
         return chat;
     }
@@ -114,6 +118,7 @@ export class ChatService {
                     !chat.enabled,
             },
         );
+        await this.onChanged?.();
         logger.info('chat.toggled', { chatId: id, enabled: updated.enabled });
         return updated;
     }
@@ -124,8 +129,11 @@ export class ChatService {
         await this.repository.delete(
             id,
         );
+        await this.onChanged?.();
         logger.info('chat.deleted', { chatId: id });
     }
+
+    setOnChanged(callback: () => Promise<void>): void { this.onChanged = callback; }
 
     private validateInput(
         input: CreateChatInput,

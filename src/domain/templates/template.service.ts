@@ -48,6 +48,7 @@ export type UpdateTemplateInput = {
 };
 
 export class TemplateService {
+    private onChanged?: () => Promise<void>;
     constructor(
         private readonly repositories: RepositoriesContext,
     ) {}
@@ -108,6 +109,7 @@ export class TemplateService {
         };
 
         const saved = await this.repositories.templates.save(template);
+        await this.onChanged?.();
         logger.info('template.created', { templateId: saved.id, chatId: saved.chatId, slotCount: saved.slots.length, enabled: saved.enabled });
         return saved;
     }
@@ -233,6 +235,7 @@ export class TemplateService {
             nowIso();
 
         const saved = await this.repositories.templates.save(template);
+        await this.onChanged?.();
         logger.info('template.updated', { templateId: saved.id, changedFields: Object.keys(input), slotCount: saved.slots.length, enabled: saved.enabled });
         return saved;
     }
@@ -290,8 +293,11 @@ export class TemplateService {
         await this.repositories.templates.delete(
             templateId,
         );
+        await this.onChanged?.();
         logger.info('template.deleted', { templateId });
     }
+
+    setOnChanged(callback: () => Promise<void>): void { this.onChanged = callback; }
 
     private validateCommonFields(
         input: {

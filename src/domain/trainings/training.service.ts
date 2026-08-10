@@ -120,6 +120,11 @@ export class TrainingService {
     ): Promise<Training> {
         const training = await this.getRequired(trainingId);
 
+        if (training.status === status) return training;
+        if (!ALLOWED_TRANSITIONS[training.status].includes(status)) {
+            throw new Error(`Invalid training transition: ${training.status} -> ${status}`);
+        }
+
         training.status = status;
         training.updatedAt = nowIso();
 
@@ -129,10 +134,6 @@ export class TrainingService {
     }
 
     async open(trainingId: string): Promise<Training> {
-        const training = await this.getRequired(trainingId);
-        if (training.status === 'archived' || training.status === 'finished') {
-            throw new Error('Archived training is read-only');
-        }
         return this.updateStatus(trainingId, 'open');
     }
 
@@ -145,6 +146,10 @@ export class TrainingService {
     }
 
     async finish(trainingId: string): Promise<Training> {
+        return this.updateStatus(trainingId, 'finished');
+    }
+
+    async archive(trainingId: string): Promise<Training> {
         return this.updateStatus(trainingId, 'archived');
     }
 
@@ -214,3 +219,12 @@ export class TrainingService {
         return training;
     }
 }
+
+const ALLOWED_TRANSITIONS: Record<TrainingStatus, readonly TrainingStatus[]> = {
+    draft: ['open', 'cancelled'],
+    open: ['closed', 'cancelled'],
+    closed: ['open', 'finished', 'cancelled'],
+    cancelled: ['archived'],
+    finished: ['archived'],
+    archived: [],
+};

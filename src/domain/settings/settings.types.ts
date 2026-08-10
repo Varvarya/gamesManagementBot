@@ -1,4 +1,4 @@
-export type AdminRole = 'owner' | 'manager';
+export type AdminRole = 'owner' | 'admin';
 
 export type ClubAdmin = {
     telegramUserId: number;

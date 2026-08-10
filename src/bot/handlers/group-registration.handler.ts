@@ -3,14 +3,14 @@ import { Context } from 'telegraf';
 import { ServicesContext } from '../../app/services.context';
 import { TrainingPublisherService } from '../../domain/trainings/training-publisher.service';
 import { logger } from '../../utils/logger';
+import { isValidReservedPlaces } from '../../domain/trainings/reserved-places';
 
-type ParsedCommand = {
+export type ParsedCommand = {
     action: '+' | '-';
     places: number;
     playerName?: string;
     date?: string;
     startTime?: string;
-    unsupported?: boolean;
 };
 
 export class GroupRegistrationHandler {
@@ -79,15 +79,7 @@ export class GroupRegistrationHandler {
 
         if (!command) {
             await ctx.reply(
-                'Невірний формат. Використайте +1, +1 Імʼя, - або -1.',
-            );
-
-            return;
-        }
-
-        if (command.unsupported) {
-            await ctx.reply(
-                'Підтримується лише +1. Додавайте кожного гостя окремо: +1 Імʼя.',
+                'Невірний формат. Використайте +1…+4, +2 Імʼя або -1…-4.',
             );
 
             return;
@@ -185,15 +177,94 @@ export class GroupRegistrationHandler {
     private parseCommand(
         text: string,
     ): ParsedCommand | undefined {
+        return parseRegistrationCommand(text);
+    }
+
+    private errorFeedback(
+        error: unknown,
+    ): string {
+        const message =
+            error instanceof Error
+                ? error.message
+                : '';
+
+        if (
+            message.includes(
+                'already registered',
+            )
+        ) {
+            return 'ℹ️ Цей гравець уже зареєстрований.';
+        }
+
+        if (
+            message.includes(
+                'not open',
+            )
+        ) {
+            return '🔒 Реєстрацію на це тренування закрито.';
+        }
+
+        if (
+            message.includes(
+                'not found',
+            ) ||
+            message.includes(
+                'ambiguous',
+            )
+        ) {
+            return '❓ Тренування не знайдено. Відповідайте на оголошення або вкажіть час: +1 at HH:mm (за потреби +2 Імʼя at YYYY-MM-DD HH:mm).';
+        }
+
+        return 'Не вдалося змінити реєстрацію. Перевірте формат і спробуйте ще раз.';
+    }
+
+    private async deleteFeedbackIfEnabled(
+        ctx: Context,
+        messageId: number,
+    ): Promise<void> {
+        const settings =
+            await this.services.repositories.settings.get();
+
+        if (
+            !settings.cleanChatMode ||
+            !ctx.chat?.id
+        ) {
+            return;
+        }
+
+        const chatId =
+            ctx.chat.id;
+
+        setTimeout(() => {
+            ctx.telegram
+                .deleteMessage(
+                    chatId,
+                    messageId,
+                )
+                .catch(
+                    error =>
+                        logger.warn(
+                            'telegram.feedback_cleanup_failed',
+                            {
+                                chatId,
+                                messageId,
+                                error,
+                            },
+                        ),
+                );
+        }, 8_000);
+    }
+}
+
+export function parseRegistrationCommand(text: string): ParsedCommand | undefined {
         const value =
             text.trim();
 
-        if (
-            /^-1?$/.test(value)
-        ) {
+        const minus = value.match(/^-(\d+)$/);
+        if (minus && isValidReservedPlaces(Number(minus[1]))) {
             return {
                 action: '-',
-                places: 1,
+                places: Number(minus[1]),
             };
         }
 
@@ -208,6 +279,8 @@ export class GroupRegistrationHandler {
 
         const places =
             Number(plus[1]);
+
+        if (!isValidReservedPlaces(places)) return undefined;
 
         let remainder:
             | string
@@ -250,83 +323,5 @@ export class GroupRegistrationHandler {
             remainder,
             date,
             startTime,
-            unsupported:
-                places !== 1,
         };
-    }
-
-    private errorFeedback(
-        error: unknown,
-    ): string {
-        const message =
-            error instanceof Error
-                ? error.message
-                : '';
-
-        if (
-            message.includes(
-                'already registered',
-            )
-        ) {
-            return 'ℹ️ Цей гравець уже зареєстрований.';
-        }
-
-        if (
-            message.includes(
-                'not open',
-            )
-        ) {
-            return '🔒 Реєстрацію на це тренування закрито.';
-        }
-
-        if (
-            message.includes(
-                'not found',
-            ) ||
-            message.includes(
-                'ambiguous',
-            )
-        ) {
-            return '❓ Тренування не знайдено. Відповідайте на оголошення або вкажіть час: +1 at HH:mm (за потреби +1 at YYYY-MM-DD HH:mm).';
-        }
-
-        return 'Не вдалося змінити реєстрацію. Перевірте формат і спробуйте ще раз.';
-    }
-
-    private async deleteFeedbackIfEnabled(
-        ctx: Context,
-        messageId: number,
-    ): Promise<void> {
-        const settings =
-            await this.services.repositories.settings.get();
-
-        if (
-            !settings.cleanChatMode ||
-            !ctx.chat?.id
-        ) {
-            return;
-        }
-
-        const chatId =
-            ctx.chat.id;
-
-        setTimeout(() => {
-            ctx.telegram
-                .deleteMessage(
-                    chatId,
-                    messageId,
-                )
-                .catch(
-                    error =>
-                        logger.warn(
-                            'telegram.feedback_cleanup_failed',
-                            {
-                                chatId,
-                                messageId,
-                                error,
-                            },
-                        ),
-                );
-        }, 8_000);
-    }
 }

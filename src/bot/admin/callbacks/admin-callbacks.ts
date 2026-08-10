@@ -1,5 +1,6 @@
 export const AdminCallbacks = {
     MainMenu: 'm',
+    Back: 'nav:back',
 
     Schedule: 's',
     ActiveTrainings: 'tr:a',
@@ -80,6 +81,13 @@ export const AdminCallbacks = {
     TrainingRemovePlayerPrefix: 'tr:rp:',
     TrainingSelectAddPlayerPrefix: 'tr:sap:',
     TrainingSelectRemovePlayerPrefix: 'tr:srp:',
+    TrainingNewPlayerPreview: 'tr:np',
+    TrainingNewPlayerEdit: 'tr:ne',
+    TrainingNewPlayerSearchAgain: 'tr:ns',
+    TrainingNewPlayerPlaces: 'tr:ng',
+    TrainingNewPlayerConfirm: 'tr:nc',
+    TrainingNewPlayerCreateAnyway: 'tr:na',
+    TrainingNewPlayerCancel: 'tr:nx',
 
     ChatPrefix: 'c:v:',
     ChatTogglePrefix: 'c:t:',
@@ -94,4 +102,15 @@ export const AdminCallbacks = {
     SettingsStatus: 'cfg:st',
 
     Help: 'h',
+
+    ClubRequestList: 'cr:l',
+    ClubRequestCreate: 'cr:n',
+    ClubRequestConfirm: 'cr:ok',
+    ClubRequestEdit: 'cr:e',
+    ClubRequestCancel: 'cr:c',
+    ClubRequestViewPrefix: 'cr:v:',
+    ClubRequestApprovePrefix: 'cr:a:',
+    ClubRequestRejectPrefix: 'cr:r:',
+    ClubRequestEditPrefix: 'cr:e:',
+    ClubRequestCancelPrefix: 'cr:c:',
 } as const;

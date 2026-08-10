@@ -13,3 +13,7 @@ yarn-error.log*
 .pnp.js
 
 .vscode/*
+*.test.ts
+!src/production-readiness.test.ts
+!src/e2e/production-smoke.test.ts
+!src/e2e/multi-club-context.test.ts

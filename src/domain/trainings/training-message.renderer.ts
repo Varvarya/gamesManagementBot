@@ -40,8 +40,8 @@ export class TrainingMessageRenderer {
                 training,
                 free,
             ),
-            `👥 Записано: ${registered} / ${training.placesLimit}`,
-            `⏳ У листі очікування: ${training.waitlist.length}`,
+            `✅ Записані (${registered}/${training.placesLimit})`,
+            `⏳ У листі очікування: ${this.countPlaces(training.waitlist)}`,
             `🪑 Вільно: ${free}`,
             `🎯 Мінімум гравців: ${training.minPlayers}`,
             '',
@@ -54,8 +54,8 @@ export class TrainingMessageRenderer {
             '⏳ Лист очікування',
             this.renderEntries(training.waitlist, players),
             '',
-            '➕ +1 або +1 Імʼя',
-            '➖ - або -1',
+            '➕ +1…+4 або +2 Імʼя',
+            '➖ -1…-4',
         ]
             .filter(
                 (
@@ -112,39 +112,46 @@ export class TrainingMessageRenderer {
         entries: ParticipantEntry[],
         players: Player[],
     ): string {
-        if (
-            entries.length === 0
-        ) {
+        if (entries.length === 0) {
             return '—';
         }
 
-        return entries
-            .map(
-                (
-                    entry,
-                    index,
-                ) => {
-                    const player =
-                        players.find(
-                            item =>
-                                item.id ===
-                                entry.playerId,
-                        );
+        const lines: string[] = [];
+        let position = 1;
 
-                    const extraPlaces =
-                        entry.places > 1
-                            ? ` (${entry.places} місця)`
-                            : '';
+        for (const entry of entries) {
+            const player =
+                players.find(
+                    item =>
+                        item.id ===
+                        entry.playerId,
+                );
 
-                    const displayName =
-                        player?.displayName ??
-                        entry.displayName ??
-                        'Гравець';
+            const displayName =
+                player?.displayName ??
+                entry.displayName ??
+                'Гравець';
 
-                    return `${index + 1}. ${displayName}${extraPlaces}`;
-                },
-            )
-            .join('\n');
+            lines.push(
+                `${position}. ${displayName}`,
+            );
+
+            position += 1;
+
+            for (
+                let placeIndex = 1;
+                placeIndex < entry.places;
+                placeIndex += 1
+            ) {
+                lines.push(
+                    `${position}. +1`,
+                );
+
+                position += 1;
+            }
+        }
+
+        return lines.join('\n');
     }
 
     private countPlaces(

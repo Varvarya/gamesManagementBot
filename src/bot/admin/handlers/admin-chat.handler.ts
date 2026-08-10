@@ -94,6 +94,18 @@ export class AdminChatHandler {
             );
             if (chatId === undefined) return;
 
+            const references = (await this.services.templates.listByClubId(
+                this.services.repositories.clubId,
+            )).filter((template) => template.chatId === chatId);
+            if (references.length) {
+                await this.services.adminUi.replaceWithError(
+                    ctx,
+                    `Чат використовується у ${references.length} шаблон(ах). Спочатку виберіть інший чат або видаліть ці шаблони.`,
+                    createChatKeyboard(await this.services.chats.getRequired(chatId)),
+                );
+                return;
+            }
+
             await this.services.chats.delete(chatId);
             await this.services.adminUi.replaceWithSuccess(ctx, 'Чат видалено.', createChatsKeyboard(await this.services.chats.getAll()));
             return;

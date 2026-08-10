@@ -5,10 +5,14 @@ export function createAdminMainKeyboard(
     activeTrainingsCount: number,
     unconfirmedPlayersCount: number,
     setup?: { hasChats: boolean; hasTemplates: boolean },
+    isSuperAdmin = false,
 ) {
     return Markup.inlineKeyboard([
         ...(!setup?.hasChats ? [[Markup.button.callback('1️⃣ Додати перший чат', AdminCallbacks.AddChat)]] : []),
         ...(setup?.hasChats && !setup.hasTemplates ? [[Markup.button.callback('2️⃣ Створити розклад', AdminCallbacks.CreateTemplate)]] : []),
+        [
+            Markup.button.callback('📝 Шаблони', AdminCallbacks.Schedule),
+        ],
         [
             Markup.button.callback(
                 '📅 Розклад',
@@ -43,6 +47,7 @@ export function createAdminMainKeyboard(
                 AdminCallbacks.Settings,
             ),
         ],
+        ...(isSuperAdmin ? [[Markup.button.callback('🌐 До суперадміністратора', 'mode:super')]] : []),
     ]);
 }
 

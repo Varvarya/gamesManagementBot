@@ -50,24 +50,27 @@ export class TemplateSchedulerService {
 
     async disable(templateId: string): Promise<TrainingTemplate> {
         const template = await this.templates.disable(templateId);
-        this.cancelTemplateJobs(template.id);
+        this.cancelTemplateJobs(template.clubId, template.id);
         return template;
     }
 
     async delete(templateId: string): Promise<void> {
-        this.cancelTemplateJobs(templateId);
+        const template = await this.templates.getRequired(templateId);
+        this.cancelTemplateJobs(template.clubId, templateId);
         await this.templates.delete(templateId);
     }
 
     async restore(templates: TrainingTemplate[]): Promise<number> {
-        this.scheduler.cancelByPrefix('template:');
+        this.scheduler.cancelAll();
 
         for (const template of templates) {
-            await this.syncTemplate(template, true);
+            // Restoring recurring jobs is non-destructive. Missed publications
+            // need an explicit reconciliation decision and are not replayed here.
+            await this.syncTemplate(template, false);
         }
 
         return this.scheduler.getScheduledTemplateIds()
-            .filter(id => id.startsWith('template:'))
+            .filter(id => id.startsWith('club:'))
             .length;
     }
 
@@ -75,7 +78,7 @@ export class TemplateSchedulerService {
         template: TrainingTemplate,
         publishMissed = false,
     ): Promise<void> {
-        this.cancelTemplateJobs(template.id);
+        this.cancelTemplateJobs(template.clubId, template.id);
 
         if (!template.enabled) return;
         if (!template.slots.length) {
@@ -96,7 +99,7 @@ export class TemplateSchedulerService {
                         timezone,
                     );
                 } catch (error) {
-                    logger.error('scheduler.missed_publication_failed', { jobId: this.getSlotJobId(template.id, slot.id), templateId: template.id, slotId: slot.id, error });
+                    logger.error('scheduler.missed_publication_failed', { jobId: this.getSlotJobId(template.clubId, template.id, slot.id), clubId: template.clubId, templateId: template.id, slotId: slot.id, error });
                 }
             }
         }
@@ -108,7 +111,7 @@ export class TemplateSchedulerService {
         timezone: string,
     ): void {
         const resolved = resolveTemplateSlot(template, slot);
-        const jobId = this.getSlotJobId(template.id, slot.id);
+        const jobId = this.getSlotJobId(template.clubId, template.id, slot.id);
 
         this.scheduler.rescheduleTemplate(
             {
@@ -206,12 +209,12 @@ export class TemplateSchedulerService {
         });
     }
 
-    private cancelTemplateJobs(templateId: string): void {
-        this.scheduler.cancelByPrefix(`template:${templateId}:slot:`);
+    private cancelTemplateJobs(clubId: string, templateId: string): void {
+        this.scheduler.cancelByPrefix(`club:${clubId}:template:${templateId}:slot:`);
     }
 
-    private getSlotJobId(templateId: string, slotId: string): string {
-        return `template:${templateId}:slot:${slotId}`;
+    private getSlotJobId(clubId: string, templateId: string, slotId: string): string {
+        return `club:${clubId}:template:${templateId}:slot:${slotId}`;
     }
 }
 

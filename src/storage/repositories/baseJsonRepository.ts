@@ -41,43 +41,44 @@ export class BaseJsonRepository<T extends EntityWithId> {
 
     async list(): Promise<T[]> {
         await this.load();
-        return [...this.cache];
+        return structuredClone(this.cache);
     }
 
     async findById(id: string): Promise<T | undefined> {
         await this.load();
-        return this.cache.find((item) => item.id === id);
+        const found = this.cache.find((item) => item.id === id);
+        return found ? structuredClone(found) : undefined;
     }
 
     async save(entity: T): Promise<T> {
         await this.load();
 
-        const index = this.cache.findIndex((item) => item.id === entity.id);
+        const next = structuredClone(this.cache);
+        const saved = structuredClone(entity);
+        const index = next.findIndex((item) => item.id === entity.id);
 
         if (index === -1) {
-            this.cache.push(entity);
+            next.push(saved);
         } else {
-            this.cache[index] = entity;
+            next[index] = saved;
         }
 
-        await this.saveAll();
+        await this.saveAll(next);
 
-        return entity;
+        return structuredClone(saved);
     }
 
     async delete(id: string): Promise<void> {
         await this.load();
 
-        this.cache = this.cache.filter((item) => item.id !== id);
-
-        await this.saveAll();
+        await this.saveAll(this.cache.filter((item) => item.id !== id));
     }
 
     async saveAll(items?: T[]): Promise<void> {
-        if (items) {
-            this.cache = [...items];
-        }
-
-        await atomicWriteJson(this.filePath, this.cache);
+        const next = structuredClone(items ?? this.cache);
+        // Commit the in-memory view only after the durable write succeeds. This
+        // keeps a failed disk write from looking successful to later requests.
+        await atomicWriteJson(this.filePath, next);
+        this.cache = next;
     }
 }

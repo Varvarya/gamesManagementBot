@@ -36,12 +36,14 @@ export class AdminTrainingHandler {
             callback === AdminCallbacks.ArchivedTrainings ||
             callback.startsWith(AdminCallbacks.ArchiveMonthPrefix) ||
             callback.startsWith(AdminCallbacks.ArchivedTrainingPrefix) ||
-            callback.startsWith(
-                AdminCallbacks.TrainingPrefix,
-            ) ||
-            callback.startsWith(
-                AdminCallbacks.TrainingParticipantsPrefix,
-            )
+            callback.startsWith(AdminCallbacks.TrainingCancelConfirmPrefix) ||
+            callback.startsWith(AdminCallbacks.TrainingParticipantsPrefix) ||
+            callback.startsWith(AdminCallbacks.TrainingFinishPrefix) ||
+            callback.startsWith(AdminCallbacks.TrainingCancelPrefix) ||
+            callback.startsWith(AdminCallbacks.TrainingRefreshPrefix) ||
+            callback.startsWith(AdminCallbacks.TrainingClosePrefix) ||
+            callback.startsWith(AdminCallbacks.TrainingOpenPrefix) ||
+            callback.startsWith(AdminCallbacks.TrainingPrefix)
         );
     }
 

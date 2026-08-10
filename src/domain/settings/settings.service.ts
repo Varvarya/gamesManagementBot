@@ -1,5 +1,6 @@
 import { RepositoriesContext } from '../../app/repositories.context';
 import { ClubAdmin, ClubSettings } from './settings.types';
+import { isTelegramUserClubAdmin } from './club-admin-authorization';
 
 export type EditableSetting = 'title' | 'timezone';
 
@@ -32,10 +33,10 @@ export class SettingsService {
         return this.repositories.settings.save(settings);
     }
 
-    async addAdmin(telegramUserId: number, role: ClubAdmin['role'] = 'manager'): Promise<ClubSettings> {
+    async addAdmin(telegramUserId: number, role: ClubAdmin['role'] = 'admin'): Promise<ClubSettings> {
         if (!Number.isSafeInteger(telegramUserId) || telegramUserId <= 0) throw new Error('Некоректний Telegram user id');
         const settings = structuredClone(await this.get());
-        if (settings.admins.some((admin) => admin.telegramUserId === telegramUserId)) throw new Error('Цей користувач уже є адміністратором');
+        if (isTelegramUserClubAdmin(settings.admins, telegramUserId)) throw new Error('Цей користувач уже є адміністратором');
         settings.admins.push({ telegramUserId, role });
         settings.updatedAt = new Date().toISOString();
         return this.repositories.settings.save(settings);
@@ -43,7 +44,7 @@ export class SettingsService {
 
     async removeAdmin(telegramUserId: number): Promise<ClubSettings> {
         const settings = structuredClone(await this.get());
-        if (!settings.admins.some((admin) => admin.telegramUserId === telegramUserId)) throw new Error('Адміністратора не знайдено');
+        if (!isTelegramUserClubAdmin(settings.admins, telegramUserId)) throw new Error('Адміністратора не знайдено');
         if (settings.admins.length <= 1) throw new Error('Не можна видалити останнього адміністратора');
         settings.admins = settings.admins.filter((admin) => admin.telegramUserId !== telegramUserId);
         settings.updatedAt = new Date().toISOString();

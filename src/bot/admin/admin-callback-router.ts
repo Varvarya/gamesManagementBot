@@ -13,8 +13,13 @@ import { AdminSettingsHandler } from './handlers/admin-settings.handler';
 import { AdminTemplateHandler } from './handlers/admin-template.handler';
 import { AdminTrainingHandler } from './handlers/admin-training.handler';
 import { AdminChatHandler } from './handlers/admin-chat.handler';
+import { CallbackAuthorizationService } from '../authorization/callback-authorization.service';
+import { SessionContextService } from '../session/session-context.service';
+import { SessionMode } from '../session/session-context.service';
+import { AdminNavigationService } from '../navigation/admin-navigation.service';
+import { AdminCallbacks } from './callbacks/admin-callbacks';
 
-type CallbackHandler = {
+export type CallbackHandler = {
     canHandle(callback: string): boolean;
 
     handle(
@@ -23,7 +28,7 @@ type CallbackHandler = {
     ): Promise<void>;
 };
 
-type FlowCallbackHandler = {
+export type FlowCallbackHandler = {
     canHandleCallback(
         callback: string,
     ): boolean;
@@ -34,7 +39,7 @@ type FlowCallbackHandler = {
     ): Promise<void>;
 };
 
-type AnyHandler =
+export type AnyHandler =
     | CallbackHandler
     | FlowCallbackHandler;
 
@@ -44,6 +49,10 @@ export class AdminCallbackRouter {
 
     constructor(
         private readonly services: ServicesContext,
+        private readonly authorization: CallbackAuthorizationService,
+        private readonly activeClubId: string,
+        private readonly sessionContexts: SessionContextService,
+        private readonly navigation: AdminNavigationService,
 
         templateFlow: TemplateFlowHandler,
         playerFlow: PlayerFlowHandler,
@@ -84,14 +93,45 @@ export class AdminCallbackRouter {
             return;
         }
 
-        if (
-            !(await this.isAdmin(ctx.from.id))
-        ) {
+        let callback = ctx.callbackQuery.data;
+        const session = this.sessionContexts.get(ctx.from.id);
+        if (session?.mode !== SessionMode.CLUB_ADMIN || !session.activeClubId) {
+            await ctx.answerCbQuery('⚠️ Це меню вже неактивне.');
+            return;
+        }
+        if (session.activeClubId !== this.services.repositories.clubId) {
+            const settingsClubId = (await this.services.repositories.settings.get()).clubId;
+            logger.error('club.context_mismatch', {
+                sessionClubId: session.activeClubId,
+                repositoryClubId: this.services.repositories.clubId,
+                settingsClubId,
+                action: callback,
+            });
+            await ctx.answerCbQuery('⚠️ Контекст клубу змінився. Перезапустіть меню.', { show_alert: true });
+            return;
+        }
+        if (callback === AdminCallbacks.Back) {
+            this.services.adminFlow.finish(ctx.from.id);
+            callback = this.navigation.backScreen(ctx.from.id);
+        }
+        const handler = findCallbackHandler(this.handlers, callback);
+
+        if (!handler) {
+            logger.warn('telegram.admin_callback_unhandled', { callback });
+            await this.services.adminUi.notice(ctx, 'Ця кнопка вже неактуальна. Відкрийте головне меню командою /start.');
             return;
         }
 
-        const callback =
-            ctx.callbackQuery.data;
+        const requiredAccess = this.authorization.requiredAccess(callback);
+        const activeClubId = this.sessionContexts?.get(ctx.from.id)?.activeClubId ?? this.activeClubId;
+        if (!await this.authorization.canAccessCallback({ telegramUserId: ctx.from.id, callback, activeClubId, requiredAccess })) {
+            logger.warn('telegram.callback_access_denied', { telegramUserId: ctx.from.id, callback, requiredAccess, activeClubId, matchedHandler: handler.constructor.name });
+            try { await ctx.answerCbQuery('⛔ У вас немає доступу до цієї дії.', { show_alert: true }); }
+            catch { await ctx.reply('⛔ У вас немає доступу до цієї дії.'); }
+            return;
+        }
+        if (callback === AdminCallbacks.MainMenu) this.navigation.resetToRoot(ctx.from.id);
+        else if (isNavigableScreen(callback) && this.sessionContexts.get(ctx.from.id)?.navigationStack.at(-1)?.screen !== callback) this.navigation.navigate(ctx.from.id, callback);
         const updateId = ctx.update.update_id;
         if (this.handledUpdates.has(updateId)) return;
         this.handledUpdates.add(updateId);
@@ -103,60 +143,30 @@ export class AdminCallbackRouter {
             // Callback may already be expired.
         }
 
-        for (const handler of this.handlers) {
-            const canHandle =
-                'canHandleCallback' in handler
-                    ? handler.canHandleCallback(
-                        callback,
-                    )
-                    : handler.canHandle(
-                        callback,
-                    );
-
-            if (!canHandle) {
-                continue;
-            }
-
-            if (
-                'handleCallback' in handler
-            ) {
-                await handler.handleCallback(
-                    ctx,
-                    callback,
-                );
-            } else {
-                await handler.handle(
-                    ctx,
-                    callback,
-                );
-            }
-
-            return;
-        }
-
-        logger.warn('telegram.admin_callback_unhandled', { callback });
-        await this.services.adminUi.notice(ctx, 'Ця кнопка вже неактуальна. Відкрийте головне меню командою /start.');
+        if ('handleCallback' in handler) await handler.handleCallback(ctx, callback);
+        else await handler.handle(ctx, callback);
+        if (callback === 'cfg' || callback.startsWith('cfg:')) await this.authorization.recordMeaningfulActivity(activeClubId);
     }
 
-    private async isAdmin(
-        telegramUserId: number,
-    ): Promise<boolean> {
-        const superAdmins =
-            process.env.SUPER_ADMIN_IDS
-                ?.split(',')
-                .map(Number)
-            ?? [];
-
-        if (superAdmins.includes(telegramUserId)) {
-            return true;
-        }
-
-        const settings =
-            await this.services.repositories.settings.get();
-
-        return settings.admins.some(
-            admin =>
-                admin.telegramUserId === telegramUserId,
-        );
+    /** Used by routing contract tests to ensure generated buttons are registered. */
+    canDispatchCallback(callback: string): boolean {
+        return findCallbackHandler(this.handlers, callback) !== undefined;
     }
 }
+
+function isNavigableScreen(callback: string): boolean {
+    return ['s', 'tr:a', 'tr:r', 'p', 'p:u', 'p:a', 'p:k', 'p:i', 'c', 'cfg', 'cfg:a', 'cfg:st'].includes(callback)
+        || /^(?:tr:v:|tr:ra:|p:v:|c:v:|t:v:)/.test(callback);
+}
+
+export function findCallbackHandler(
+    handlers: readonly AnyHandler[],
+    callback: string,
+): AnyHandler | undefined {
+    if (callback === AdminCallbacks.Back) return NAVIGATION_BACK_HANDLER;
+    return handlers.find((candidate) => 'canHandleCallback' in candidate
+        ? candidate.canHandleCallback(callback)
+        : candidate.canHandle(callback));
+}
+
+const NAVIGATION_BACK_HANDLER: CallbackHandler = { canHandle: (callback) => callback === AdminCallbacks.Back, handle: async () => undefined };

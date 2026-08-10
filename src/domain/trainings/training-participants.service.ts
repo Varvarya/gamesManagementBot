@@ -3,6 +3,7 @@ import { nowIso } from '../../utils/date';
 import { ParticipantEntry, ParticipantSource, Training } from './training.types';
 import { TrainingService } from './training.service';
 import { logger } from '../../utils/logger';
+import { validateReservedPlaces } from './reserved-places';
 
 type AddInput = {
     trainingId: string;
@@ -16,7 +17,7 @@ type AddInput = {
 
 export type ParticipantMutation = {
     training: Training;
-    outcome: 'registered' | 'waitlisted' | 'removed' | 'not_registered';
+    outcome: 'registered' | 'waitlisted' | 'decremented' | 'removed' | 'not_registered';
     promotedPlayerIds: string[];
 };
 
@@ -42,9 +43,9 @@ export class TrainingParticipantsService {
                 playerId: input.playerId,
                 displayName,
                 telegramUserId: input.telegramUserId,
-                places: 1,
+                places: input.places,
                 source: input.source,
-                status: this.countFreePlaces(training) > 0 ? 'active' : 'waiting',
+                status: this.countFreePlaces(training) >= input.places ? 'active' : 'waiting',
                 createdAt: nowIso(),
                 updatedAt: nowIso(),
             };
@@ -69,22 +70,35 @@ export class TrainingParticipantsService {
     async removeParticipant(input: {
         trainingId: string;
         playerId: string;
+        requestedPlacesToRemove: number;
         overrideState?: boolean;
     }): Promise<ParticipantMutation> {
+        const requestedPlacesToRemove = input.requestedPlacesToRemove;
+        this.validatePlaces(requestedPlacesToRemove);
         return this.serialize(input.trainingId, async () => {
             const training = await this.trainings.getRequired(input.trainingId);
             this.ensureTrainingIsOpen(training, input.overrideState);
-            const existed = Boolean(this.findParticipant(training, input.playerId));
-            training.participants = training.participants.filter((entry) => entry.playerId !== input.playerId);
-            training.waitlist = training.waitlist.filter((entry) => entry.playerId !== input.playerId);
-            if (!existed) return { training, outcome: 'not_registered', promotedPlayerIds: [] };
+            const participant = this.findParticipant(training, input.playerId);
+            if (!participant) return { training, outcome: 'not_registered', promotedPlayerIds: [] };
 
-            const promotedPlayerIds = this.promoteWaitlist(training);
+            const wasActive = participant.status === 'active';
+            let outcome: ParticipantMutation['outcome'];
+            if (participant.places > requestedPlacesToRemove) {
+                participant.places -= requestedPlacesToRemove;
+                participant.updatedAt = nowIso();
+                outcome = 'decremented';
+            } else {
+                training.participants = training.participants.filter((entry) => entry.playerId !== input.playerId);
+                training.waitlist = training.waitlist.filter((entry) => entry.playerId !== input.playerId);
+                outcome = 'removed';
+            }
+
+            const promotedPlayerIds = wasActive ? this.promoteWaitlist(training) : [];
             const saved = await this.trainings.save(training);
-            logger.info('registration.removed', { trainingId: saved.id, playerId: input.playerId, promotedPlayerIds });
+            logger.info('registration.removed', { trainingId: saved.id, playerId: input.playerId, outcome, remainingPlaces: outcome === 'decremented' ? participant.places : 0, promotedPlayerIds });
             return {
                 training: saved,
-                outcome: 'removed',
+                outcome,
                 promotedPlayerIds,
             };
         });
@@ -92,11 +106,21 @@ export class TrainingParticipantsService {
 
     async removeParticipantPlaces(input: { trainingId: string; playerId: string; places: number }): Promise<Training> {
         this.validatePlaces(input.places);
-        return (await this.removeParticipant(input)).training;
+        return (await this.removeParticipant({ ...input, requestedPlacesToRemove: input.places })).training;
     }
 
     async removeParticipantCompletely(input: { trainingId: string; playerId: string; overrideState?: boolean }): Promise<Training> {
-        return (await this.removeParticipant(input)).training;
+        return this.serialize(input.trainingId, async () => {
+            const training = await this.trainings.getRequired(input.trainingId);
+            this.ensureTrainingIsOpen(training, input.overrideState);
+            const participant = this.findParticipant(training, input.playerId);
+            if (!participant) return training;
+            const wasActive = participant.status === 'active';
+            training.participants = training.participants.filter((entry) => entry.playerId !== input.playerId);
+            training.waitlist = training.waitlist.filter((entry) => entry.playerId !== input.playerId);
+            if (wasActive) this.promoteWaitlist(training);
+            return this.trainings.save(training);
+        });
     }
 
     countActivePlaces(training: Training): number {
@@ -114,7 +138,10 @@ export class TrainingParticipantsService {
     private promoteWaitlist(training: Training): string[] {
         const promoted: string[] = [];
         while (this.countFreePlaces(training) > 0 && training.waitlist.length > 0) {
-            const next = training.waitlist.shift()!;
+            const free = this.countFreePlaces(training);
+            const index = training.waitlist.findIndex((entry) => entry.places <= free);
+            if (index < 0) break;
+            const [next] = training.waitlist.splice(index, 1);
             next.status = 'active';
             next.updatedAt = nowIso();
             training.participants.push(next);
@@ -131,7 +158,7 @@ export class TrainingParticipantsService {
     }
 
     private validatePlaces(places: number): void {
-        if (places !== 1) throw new Error('Only +1 registration is supported; add each guest separately');
+        validateReservedPlaces(places);
     }
 
     private async serialize<T>(trainingId: string, operation: () => Promise<T>): Promise<T> {

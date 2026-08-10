@@ -17,7 +17,7 @@ export function createActiveTrainingsKeyboard(
         [
             Markup.button.callback(
                 '◀️ Назад',
-                AdminCallbacks.MainMenu,
+                AdminCallbacks.Back,
             ),
         ],
     ]);
@@ -60,7 +60,7 @@ export function createTrainingKeyboard(
         [
             Markup.button.callback(
                 '◀️ До списку',
-                AdminCallbacks.ActiveTrainings,
+                AdminCallbacks.Back,
             ),
             Markup.button.callback(
                 '🏠 Меню',
@@ -72,7 +72,7 @@ export function createTrainingKeyboard(
 
 export function createTrainingParticipantsKeyboard(training: Training) {
     return Markup.inlineKeyboard([
-        [Markup.button.callback('◀️ Назад', `${AdminCallbacks.TrainingPrefix}${training.id}`)],
+        [Markup.button.callback('◀️ Назад', AdminCallbacks.Back)],
     ]);
 }
 
@@ -89,7 +89,7 @@ export function createTrainingCancelKeyboard(
         [
             Markup.button.callback(
                 '◀️ Назад',
-                `${AdminCallbacks.TrainingPrefix}${trainingId}`,
+                AdminCallbacks.Back,
             ),
         ],
     ]);
@@ -115,9 +115,38 @@ export function createTrainingPlayerSearchKeyboard(
         [
             Markup.button.callback(
                 '◀️ Назад',
-                `${AdminCallbacks.TrainingPrefix}${trainingId}`,
+                AdminCallbacks.Back,
             ),
         ],
+    ]);
+}
+
+export function createUnknownTrainingPlayerKeyboard() {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback('➕ Створити й додати', AdminCallbacks.TrainingNewPlayerPreview)],
+        [Markup.button.callback('✏️ Змінити ім’я', AdminCallbacks.TrainingNewPlayerEdit)],
+        [Markup.button.callback('🔎 Шукати ще раз', AdminCallbacks.TrainingNewPlayerSearchAgain)],
+        [Markup.button.callback('❌ Скасувати', AdminCallbacks.TrainingNewPlayerCancel)],
+    ]);
+}
+
+export function createNewTrainingPlayerPreviewKeyboard() {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback('✅ Створити й додати', AdminCallbacks.TrainingNewPlayerConfirm)],
+        [Markup.button.callback('✏️ Змінити ім’я', AdminCallbacks.TrainingNewPlayerEdit)],
+        [Markup.button.callback('👥 Змінити кількість місць', AdminCallbacks.TrainingNewPlayerPlaces)],
+        [Markup.button.callback('❌ Скасувати', AdminCallbacks.TrainingNewPlayerCancel)],
+    ]);
+}
+
+export function createTrainingPlayerDuplicateKeyboard(players: Player[]) {
+    return Markup.inlineKeyboard([
+        ...players.slice(0, 10).map((player) => [
+            Markup.button.callback(player.displayName, `${AdminCallbacks.TrainingSelectAddPlayerPrefix}${player.id}`),
+        ]),
+        [Markup.button.callback('➕ Все одно створити', AdminCallbacks.TrainingNewPlayerCreateAnyway)],
+        [Markup.button.callback('✏️ Змінити пошук', AdminCallbacks.TrainingNewPlayerEdit)],
+        [Markup.button.callback('❌ Скасувати', AdminCallbacks.TrainingNewPlayerCancel)],
     ]);
 }
 

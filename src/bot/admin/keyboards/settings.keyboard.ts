@@ -8,7 +8,7 @@ export function createSettingsKeyboard(cleanChatMode: boolean) {
         [Markup.button.callback('🏸 Назва клубу', `${edit}title`), Markup.button.callback('🌍 Часовий пояс', `${edit}timezone`)],
         [Markup.button.callback('👮 Адміністратори', AdminCallbacks.SettingsAdmins), Markup.button.callback(cleanChatMode ? '🧹 Очищення: увімкнено' : '🧹 Очищення: вимкнено', AdminCallbacks.SettingsToggleCleanChat)],
         [Markup.button.callback('📊 Статус', AdminCallbacks.SettingsStatus)],
-        [Markup.button.callback('◀️ Назад', AdminCallbacks.MainMenu)],
+        [Markup.button.callback('◀️ Назад', AdminCallbacks.Back)],
     ]);
 }
 
@@ -16,13 +16,13 @@ export function createAdminsKeyboard(admins: ClubAdmin[]) {
     return Markup.inlineKeyboard([
         ...admins.map((admin) => [Markup.button.callback(`➖ ${admin.telegramUserId} (${admin.role})`, `${AdminCallbacks.SettingsRemoveAdminPrefix}${admin.telegramUserId}`)]),
         [Markup.button.callback('➕ Додати адміністратора', AdminCallbacks.SettingsAddAdmin)],
-        [Markup.button.callback('◀️ Налаштування', AdminCallbacks.Settings)],
+        [Markup.button.callback('◀️ Налаштування', AdminCallbacks.Back)],
     ]);
 }
 
 export function createStatusKeyboard() {
     return Markup.inlineKeyboard([
         [Markup.button.callback('🔄 Оновити', AdminCallbacks.SettingsStatus)],
-        [Markup.button.callback('◀️ До налаштувань', AdminCallbacks.Settings)],
+        [Markup.button.callback('◀️ До налаштувань', AdminCallbacks.Back)],
     ]);
 }

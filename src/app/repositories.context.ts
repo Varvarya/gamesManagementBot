@@ -19,6 +19,7 @@ type LegacyTemplateDefaults = {
 };
 
 export class RepositoriesContext {
+    readonly clubId: string;
     readonly chats: ChatsRepository;
     readonly players: PlayersRepository;
     readonly trainings: TrainingsRepository;
@@ -33,6 +34,7 @@ export class RepositoriesContext {
         defaultTimezone = 'Europe/Kyiv',
         identity: { clubId: string; title: string; storageSlug: string } = { clubId: 'club', title: 'Club', storageSlug: 'club' },
     ) {
+        this.clubId = identity.clubId;
         this.storagePath = storage.getDirectoryPath();
         this.diagnosticIdentity = identity;
         this.chats =
@@ -82,8 +84,8 @@ export class RepositoriesContext {
                     admins: [],
                     cleanChatMode: true,
 
-                    createdAt: Date.now().toString(),
-                    updatedAt: Date.now().toString(),
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString(),
                 },
             );
     }
@@ -183,9 +185,16 @@ export function backfillParticipantDisplayNames(trainings: Training[], players: 
     for (const training of trainings) {
         for (const entry of [...training.participants, ...training.waitlist]) {
             const legacyEntry = entry as typeof entry & { displayName?: string };
-            if (legacyEntry.displayName?.trim()) continue;
-            legacyEntry.displayName = playerNames.get(entry.playerId)?.trim() || 'Гравець';
-            migratedEntries += 1;
+            let changed = false;
+            if (!legacyEntry.displayName?.trim()) {
+                legacyEntry.displayName = playerNames.get(entry.playerId)?.trim() || 'Гравець';
+                changed = true;
+            }
+            if (!Number.isInteger(entry.places) || entry.places < 1) {
+                entry.places = 1;
+                changed = true;
+            }
+            if (changed) migratedEntries += 1;
         }
     }
     return migratedEntries;

@@ -16,8 +16,13 @@ export const ADMIN_FLOW_STATES = [
     'waiting_player_alias',
     'waiting_player_merge_target',
     'waiting_player_merge_confirmation',
+    'waiting_player_training_places',
     'waiting_training_add_player',
     'waiting_training_remove_player',
+    'waiting_training_reservation_places',
+    'waiting_training_new_player_name',
+    'waiting_training_new_player_places',
+    'waiting_training_new_player_confirmation',
     'waiting_training_archive_search',
     'waiting_setting_value',
     'waiting_admin_id',
@@ -44,6 +49,8 @@ export type AdminFlowData = {
     templateId?: string;
     playerId?: string;
     trainingId?: string;
+    reservedPlaces?: number;
+    reservationAction?: 'add' | 'remove';
     sourcePlayerId?: string;
     searchQuery?: string;
     playerResultIds?: string[];
@@ -57,6 +64,7 @@ export type AdminFlowData = {
     allowDuplicatePlayerCreation?: boolean;
     targetPlayerId?: string;
     pendingPlayerName?: string;
+    newTrainingPlayerPlaces?: number;
     pendingChatName?: string;
     pendingChatId?: number;
     settingField?: string;

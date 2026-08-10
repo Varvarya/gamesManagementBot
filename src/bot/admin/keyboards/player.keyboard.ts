@@ -25,7 +25,7 @@ export function createPlayersKeyboard(
         [
             Markup.button.callback(
                 '◀️ Назад',
-                AdminCallbacks.MainMenu,
+                AdminCallbacks.Back,
             ),
         ],
     ]);
@@ -100,7 +100,7 @@ export function createPlayerKeyboard(
         [
             Markup.button.callback(
                 '◀️ Назад',
-                AdminCallbacks.Players,
+                AdminCallbacks.Back,
             ),
         ],
     ]);
@@ -109,7 +109,7 @@ export function createPlayerKeyboard(
 export function createPlayerDeleteConfirmationKeyboard(playerId: string) {
     return Markup.inlineKeyboard([
         [Markup.button.callback('🗑 Так, видалити', `${AdminCallbacks.PlayerDeleteConfirmPrefix}${playerId}`)],
-        [Markup.button.callback('◀️ До картки', `${AdminCallbacks.PlayerPrefix}${playerId}`)],
+        [Markup.button.callback('◀️ До картки', AdminCallbacks.Back)],
     ]);
 }
 
@@ -117,7 +117,7 @@ export function createPlayerTrainingKeyboard(playerId: string, trainings: Traini
     const prefix = action === 'add' ? AdminCallbacks.PlayerSelectAddTrainingPrefix : AdminCallbacks.PlayerSelectRemoveTrainingPrefix;
     return Markup.inlineKeyboard([
         ...trainings.map((training) => [Markup.button.callback(`${training.date} ${training.startTime} — ${training.title}`, `${prefix}${training.id}`)]),
-        [Markup.button.callback('◀️ Назад', `${AdminCallbacks.PlayerPrefix}${playerId}`)],
+        [Markup.button.callback('◀️ Назад', AdminCallbacks.Back)],
     ]);
 }
 

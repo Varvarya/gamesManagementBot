@@ -19,20 +19,6 @@ export class PlayerService {
         return this.serialize(async () => {
         let existing = await this.repositories.players.findByTelegramId(user.id);
 
-        if (!existing) {
-            const candidates = await this.repositories.players.list();
-            const identities = [user.username, user.first_name]
-                .filter((value): value is string => Boolean(value))
-                .map((value) => value.trim().replace(/^@/, '').toLocaleLowerCase());
-            existing = candidates.find((player) =>
-                player.telegramUserId === undefined &&
-                [player.username, player.displayName, player.telegramName, ...player.aliases]
-                    .filter((value): value is string => Boolean(value))
-                    .some((value) => identities.includes(value.trim().replace(/^@/, '').toLocaleLowerCase())),
-            );
-            if (existing) existing.telegramUserId = user.id;
-        }
-
         if (existing) {
             let changed = existing.telegramUserId === user.id;
 
@@ -72,6 +58,7 @@ export class PlayerService {
             aliases: [],
             isConfirmed: false,
             isActive: true,
+            source: 'telegram',
 
             createdAt: now,
             updatedAt: now,
@@ -307,6 +294,27 @@ export class PlayerService {
 
         const saved = await this.repositories.players.save(player);
         logger.info('player.created', { playerId: saved.id, source: 'admin', confirmed: true });
+        return saved;
+    }
+
+    async createUnconfirmedByAdmin(displayName: string): Promise<Player> {
+        const normalizedName = this.normalizeName(displayName);
+        if (normalizedName.length < 2 || normalizedName.length > 100) {
+            throw new Error('Invalid player display name');
+        }
+        const now = nowIso();
+        const player: Player = {
+            id: createId('player'),
+            displayName: normalizedName,
+            aliases: [],
+            isConfirmed: false,
+            isActive: true,
+            source: 'admin',
+            createdAt: now,
+            updatedAt: now,
+        };
+        const saved = await this.repositories.players.save(player);
+        logger.info('player.created', { playerId: saved.id, source: 'admin', confirmed: false });
         return saved;
     }
 

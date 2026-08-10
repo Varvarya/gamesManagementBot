@@ -2,10 +2,15 @@ import { Context } from 'telegraf';
 import { ServicesContext } from '../../../app/services.context';
 import { AdminCallbacks } from '../callbacks/admin-callbacks';
 import { createAdminMainKeyboard, createMainMenuBackKeyboard } from '../keyboards/main.keyboard';
+import { SessionContextService } from '../../session/session-context.service';
+import { logger } from '../../../utils/logger';
+import { isTelegramUserClubAdmin } from '../../../domain/settings/club-admin-authorization';
 
 export class AdminMenuHandler {
     constructor(
         private readonly services: ServicesContext,
+        private readonly superAdminIds: readonly number[] = [],
+        private readonly sessions?: SessionContextService,
     ) {}
 
     canHandle(callback: string): boolean {
@@ -34,6 +39,9 @@ export class AdminMenuHandler {
 
         const settings =
             await this.services.repositories.settings.get();
+        const session = this.sessions?.get(adminId);
+        const debug = { telegramUserId: adminId, action: 'club_menu_opened', mode: session?.mode, activeClubId: session?.activeClubId, repositoryClubId: this.services.repositories.clubId, settingsClubId: settings.clubId, adminEntries: settings.admins, isClubAdmin: isTelegramUserClubAdmin(settings.admins, adminId), flowState: this.services.adminFlow.getState(adminId) };
+        if (session?.activeClubId && (session.activeClubId !== this.services.repositories.clubId || session.activeClubId !== settings.clubId)) logger.error('admin.session_debug', debug); else logger.info('admin.session_debug', debug);
 
         const activeTrainings =
             await this.services.repositories.trainings.listActive();
@@ -51,7 +59,7 @@ export class AdminMenuHandler {
         await this.services.adminUi.showRootMenu(
             ctx,
             [
-                `🏸 ${settings.title}`,
+                `🏸 ${this.sessions?.get(adminId)?.activeClubName ?? settings.title}`,
                 '',
                 setupLines.length ? setupLines.join('\n') : 'Керування клубом',
                 unconfirmedPlayers.length > 0
@@ -62,6 +70,7 @@ export class AdminMenuHandler {
                 activeTrainings.length,
                 unconfirmedPlayers.length,
                 { hasChats: chats.length > 0, hasTemplates: templates.length > 0 },
+                this.superAdminIds.includes(adminId),
             ),
         );
     }
@@ -72,7 +81,7 @@ export class AdminMenuHandler {
             '💬 Чати — додайте групу, де бот публікуватиме тренування.',
             '📅 Розклад — створіть шаблон, виберіть чат, дні та час.',
             '📣 Бот сам опублікує тренування у вибраний час.',
-            '👤 Гравці записуються відповіддю +1. Після заповнення місць вони потрапляють до листа очікування.',
+            '👤 Гравці записуються командами +1…+4. Для гостя: +2 Іван. Якщо місць недостатньо, реєстрація потрапляє до листа очікування.',
             '🏸 У тренуванні можна додати чи прибрати гравця, закрити запис або скасувати заняття.',
             '❌ Кнопка «Скасувати» завершує поточне налаштування без збереження.',
         ].join('\n'), createMainMenuBackKeyboard());

@@ -21,6 +21,8 @@ import {
     formatDay,
     renderTemplateCard,
 } from '../ui/admin-formatters';
+import { logger } from '../../../utils/logger';
+import { isTelegramUserClubAdmin } from '../../../domain/settings/club-admin-authorization';
 
 import { AdminFlowState, PendingTemplate } from './admin-flow.types';
 
@@ -130,6 +132,7 @@ export class TemplateFlowHandler {
         if (callback === AdminCallbacks.BackFromTemplatePreview) {
             const mode = this.getMode(adminId);
             this.services.adminFlow.transition(adminId, mode === 'edit' ? 'waiting_template_edit_input' : 'waiting_template_quick_input');
+            await this.logSessionDebug(adminId, 'template_back');
             await this.services.adminUi.show(ctx, [mode === 'edit' ? '✏️ Редагування шаблону' : '➕ Новий шаблон', '', 'Надішліть виправлені дані ще раз. Попередньо введені дані збережено.'].join('\n'), createFlowCancelKeyboard(mode === 'edit' ? AdminCallbacks.CancelEditTemplate : AdminCallbacks.CancelCreateTemplate));
             return;
         }
@@ -317,6 +320,7 @@ export class TemplateFlowHandler {
             adminId,
             'waiting_template_quick_input',
         );
+        await this.logSessionDebug(adminId, 'template_edit_started');
 
         await this.services.adminUi.show(
             ctx,
@@ -527,6 +531,9 @@ export class TemplateFlowHandler {
             return;
         }
 
+        await this.logSessionDebug(adminId, 'template_save_started');
+        const settingsBefore = await this.services.repositories.settings.get();
+        const adminsBefore = JSON.stringify(settingsBefore.admins);
         let template;
         try {
             template = await this.templateScheduler.update(
@@ -536,14 +543,19 @@ export class TemplateFlowHandler {
                     chatId,
                 },
             );
+            template = await this.services.templates.getRequired(template.id);
         } catch (error) {
             await this.services.adminUi.replaceWithError(ctx, `${error instanceof Error ? error.message : 'Не вдалося оновити шаблон.'}\n\nВиправте дані або виберіть інший чат.`, createTemplatePreviewKeyboard('edit'));
             return;
         }
 
+        const settingsAfter = await this.services.repositories.settings.get();
+        if (JSON.stringify(settingsAfter.admins) !== adminsBefore) throw new Error('Template update unexpectedly changed club administrators');
+
         this.services.adminFlow.finish(
             adminId,
         );
+        await this.logSessionDebug(adminId, 'template_saved');
 
         await this.services.adminUi.replaceWithSuccess(
             ctx,
@@ -668,6 +680,8 @@ export class TemplateFlowHandler {
             return;
         }
 
+        await this.logSessionDebug(adminId, 'template_preview_opened');
+
         await this.services.adminUi.show(
             ctx,
             [
@@ -688,6 +702,7 @@ export class TemplateFlowHandler {
         const data =
             this.services.adminFlow.getData(adminId);
         const mode = this.getMode(adminId);
+        await this.logSessionDebug(adminId, 'template_back');
 
         if (
             data.pendingTemplate?.chatId !== undefined &&
@@ -757,9 +772,11 @@ export class TemplateFlowHandler {
                 adminId,
             );
 
+        await this.logSessionDebug(adminId, 'template_cancel_started');
         this.services.adminFlow.finish(
             adminId,
         );
+        await this.logSessionDebug(adminId, 'template_cancelled');
 
         if (data.templateId) {
             const template =
@@ -822,6 +839,24 @@ export class TemplateFlowHandler {
                 backCallback,
             ),
         );
+    }
+
+    private async logSessionDebug(adminId: number, action: string): Promise<void> {
+        const session = this.services.sessionContexts?.get(adminId);
+        const settings = await this.services.repositories.settings.get();
+        const fields = {
+            telegramUserId: adminId,
+            action,
+            mode: session?.mode,
+            activeClubId: session?.activeClubId,
+            repositoryClubId: this.services.repositories.clubId,
+            settingsClubId: settings.clubId,
+            adminEntries: settings.admins,
+            isClubAdmin: isTelegramUserClubAdmin(settings.admins, adminId),
+            flowState: this.services.adminFlow.getState(adminId),
+        };
+        if (session?.activeClubId && (session.activeClubId !== this.services.repositories.clubId || session.activeClubId !== settings.clubId)) logger.error('admin.session_debug', fields);
+        else logger.info('admin.session_debug', fields);
     }
 
     private parseTemplateInput(

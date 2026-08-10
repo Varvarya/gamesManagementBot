@@ -442,7 +442,7 @@ export class SuperAdminConfigService {
         try { new Intl.DateTimeFormat('en', { timeZone: settings.timezone }).format(); }
         catch { throw new Error('settings.timezone is invalid'); }
         if (typeof settings.cleanChatMode !== 'boolean') throw new Error('settings schema is invalid');
-        if (settings.admins.some((admin) => !Number.isSafeInteger(admin.telegramUserId) || !['owner', 'manager'].includes(admin.role))) throw new Error('settings.admins schema is invalid');
+        if (settings.admins.some((admin) => !Number.isSafeInteger(admin.telegramUserId) || !['owner', 'admin'].includes(admin.role))) throw new Error('settings.admins schema is invalid');
     }
 
     private validateTemplate(

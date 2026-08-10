@@ -7,9 +7,10 @@ import { createDuplicateKeyboard, createMergePreviewKeyboard, createPlayerDelete
 import { renderPlayerCard } from '../ui/admin-formatters';
 import { AdminFlowState } from './admin-flow.types';
 import { renderNumbered } from '../handlers/admin-player.handler';
+import { validateReservedPlaces } from '../../../domain/trainings/reserved-places';
 
 export class PlayerFlowHandler {
-    readonly textStates: readonly AdminFlowState[] = ['waiting_player_name', 'waiting_new_player_name', 'waiting_player_search', 'waiting_player_selection', 'waiting_player_alias', 'waiting_player_merge_target', 'waiting_player_merge_confirmation'];
+    readonly textStates: readonly AdminFlowState[] = ['waiting_player_name', 'waiting_new_player_name', 'waiting_player_search', 'waiting_player_selection', 'waiting_player_alias', 'waiting_player_merge_target', 'waiting_player_merge_confirmation', 'waiting_player_training_places'];
     constructor(
         private readonly services: ServicesContext,
         private readonly publisher: TrainingPublisherService,
@@ -177,17 +178,16 @@ export class PlayerFlowHandler {
                 if (add) {
                     const player = await this.services.repositories.players.findById(playerId);
                     if (!player) throw new Error('Гравця не знайдено');
-                    const result = await this.services.trainingParticipants.addParticipant({ trainingId, playerId, displayName: player.displayName, telegramUserId: player.telegramUserId, places: 1, source: 'admin' });
-                    await this.publisher.refreshMessage(trainingId);
-                    await this.services.adminUi.replaceWithSuccess(ctx, result.outcome === 'waitlisted' ? 'Гравця додано до листа очікування' : 'Гравця додано до основного списку', createPlayerKeyboard(player));
+                    this.services.adminFlow.transition(adminId, 'waiting_player_training_places', { trainingId, playerId });
+                    await this.services.adminUi.show(ctx, `➕ ${player.displayName}\n\nСкільки місць зарезервувати? Надішліть число від 1 до 4.`, createFlowNavigationKeyboard(`${AdminCallbacks.PlayerPrefix}${playerId}`, AdminCallbacks.Players));
+                    return;
                 } else {
-                    const result = await this.services.trainingParticipants.removeParticipant({ trainingId, playerId, overrideState: true });
-                    if (result.outcome === 'not_registered') throw new Error('Гравець не зареєстрований');
-                    await this.publisher.refreshMessage(trainingId);
                     const player = await this.services.repositories.players.findById(playerId);
-                    await this.services.adminUi.replaceWithSuccess(ctx, result.promotedPlayerIds.length ? 'Гравця видалено, першого з черги підвищено' : 'Гравця видалено', createPlayerKeyboard(player!));
+                    if (!player) throw new Error('Гравця не знайдено');
+                    this.services.adminFlow.transition(adminId, 'waiting_player_training_places', { trainingId, playerId, reservationAction: 'remove' });
+                    await this.services.adminUi.show(ctx, `➖ ${player.displayName}\n\nСкільки місць скасувати? Надішліть число від 1 до 4.`, createFlowNavigationKeyboard(`${AdminCallbacks.PlayerPrefix}${playerId}`, AdminCallbacks.Players));
+                    return;
                 }
-                this.finishPlayerFlow(adminId);
             } catch (error) {
                 await this.services.adminUi.replaceWithError(ctx, error instanceof Error ? error.message : 'Не вдалося змінити реєстрацію', createFlowCancelKeyboard(`${AdminCallbacks.PlayerPrefix}${playerId}`));
             }
@@ -318,6 +318,7 @@ export class PlayerFlowHandler {
             state === 'waiting_player_alias' ||
             state === 'waiting_player_merge_target' ||
             state === 'waiting_player_merge_confirmation'
+            || state === 'waiting_player_training_places'
         );
     }
 
@@ -335,6 +336,29 @@ export class PlayerFlowHandler {
             this.services.adminFlow.getState(
                 adminId,
             );
+
+        if (state === 'waiting_player_training_places') {
+            const data = this.services.adminFlow.getData(adminId);
+            try {
+                const places = Number(text.trim());
+                validateReservedPlaces(places);
+                const player = await this.services.repositories.players.findById(data.playerId!);
+                if (!player || !data.trainingId) throw new Error('Дані вибору застаріли');
+                const trainingId = data.trainingId;
+                const action = data.reservationAction ?? 'add';
+                const result = action === 'add'
+                    ? await this.services.trainingParticipants.addParticipant({ trainingId, playerId: player.id, displayName: player.displayName, telegramUserId: player.telegramUserId, places, source: 'admin' })
+                    : await this.services.trainingParticipants.removeParticipant({ trainingId, playerId: player.id, requestedPlacesToRemove: places, overrideState: true });
+                if (result.outcome === 'not_registered') throw new Error('Гравець не зареєстрований');
+                await this.publisher.refreshMessage(trainingId);
+                this.finishPlayerFlow(adminId);
+                const message = action === 'add' ? (result.outcome === 'waitlisted' ? 'Гравця додано до листа очікування' : 'Гравця додано до основного списку') : (result.outcome === 'decremented' ? 'Бронювання зменшено' : 'Гравця видалено з тренування');
+                await this.services.adminUi.replaceWithSuccess(ctx, message, createPlayerKeyboard(player));
+            } catch (error) {
+                await this.services.adminUi.replaceWithError(ctx, `${error instanceof Error ? error.message : 'Не вдалося додати гравця'}\n\nНадішліть число від 1 до 4.`, createFlowNavigationKeyboard(`${AdminCallbacks.PlayerPrefix}${data.playerId}`, AdminCallbacks.Players));
+            }
+            return;
+        }
 
         if (state === 'waiting_player_search') {
             const data = this.services.adminFlow.getData(adminId);

@@ -12,6 +12,7 @@ export type Player = {
     aliases: string[];
     isConfirmed: boolean;
     isActive: boolean;
+    source?: 'admin' | 'telegram';
 
     createdAt: string;
     updatedAt: string;

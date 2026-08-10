@@ -7,9 +7,11 @@ import { RegistrationService } from '../domain/trainings/registration.service';
 import { TrainingMessageRenderer } from '../domain/trainings/training-message.renderer';
 import { TrainingParticipantsService } from '../domain/trainings/training-participants.service';
 import { TrainingService } from '../domain/trainings/training.service';
+import { TrainingPlayerCreationService } from '../domain/trainings/training-player-creation.service';
 import { SchedulerService } from '../scheduler/scheduler.service';
 import { RepositoriesContext } from './repositories.context';
 import { SettingsService } from '../domain/settings/settings.service';
+import { SessionContextService } from '../bot/session/session-context.service';
 
 export class ServicesContext {
     readonly repositories: RepositoriesContext;
@@ -17,6 +19,7 @@ export class ServicesContext {
     readonly players: PlayerService;
     readonly trainings: TrainingService;
     readonly trainingParticipants: TrainingParticipantsService;
+    readonly trainingPlayerCreation: TrainingPlayerCreationService;
     readonly registration: RegistrationService;
     readonly trainingMessageRenderer: TrainingMessageRenderer;
     readonly scheduler: SchedulerService;
@@ -26,11 +29,14 @@ export class ServicesContext {
     readonly settings: SettingsService;
 
     readonly adminUi: AdminUi;
+    readonly sessionContexts?: SessionContextService;
 
     constructor(
         repositories: RepositoriesContext,
+        sessionContexts?: SessionContextService,
     ) {
         this.repositories = repositories;
+        this.sessionContexts = sessionContexts;
 
         this.players =
             new PlayerService(
@@ -46,6 +52,12 @@ export class ServicesContext {
             new TrainingParticipantsService(
                 this.trainings,
             );
+
+        this.trainingPlayerCreation = new TrainingPlayerCreationService(
+            repositories,
+            this.players,
+            this.trainingParticipants,
+        );
 
         this.registration =
             new RegistrationService(
@@ -75,6 +87,6 @@ export class ServicesContext {
             new SchedulerService();
 
         this.adminUi =
-            new AdminUi();
+            new AdminUi(sessionContexts);
     }
 }

@@ -187,7 +187,10 @@ export function isTrainingParticipantListTruncated(training: Training): boolean 
 
 function renderParticipantNames(entries: Training['participants'], names: ReadonlyMap<string, string> | undefined, limit: number): string[] {
     if (entries.length === 0) return ['—'];
-    const visible = entries.slice(0, limit).map((entry, index) => `${index + 1}. ${names?.get(entry.playerId) ?? entry.displayName ?? 'Гравець'}`);
+    const visible = entries.slice(0, limit).map((entry, index) => {
+        const places = entry.places > 1 ? ` (${entry.places} місця)` : '';
+        return `${index + 1}. ${names?.get(entry.playerId) ?? entry.displayName ?? 'Гравець'}${places}`;
+    });
     const hidden = entries.length - visible.length;
     if (hidden > 0) visible.push(`… ще ${hidden}`);
     return visible;
