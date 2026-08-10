@@ -2,7 +2,7 @@
 
 ## Production setup
 
-Install Node.js 22, copy `.env.example` to `.env`, and set a BotFather token, the initial `CLUB_NAME`, plus at least one Telegram user ID in `SUPER_ADMIN_IDS`. `DATA_DIR` must be a persistent writable directory; each club keeps its backups inside its resolved storage folder. Run `npm ci`, `npm test`, and `npm run build`.
+Install Node.js 22, copy `.env.example` to `.env`, and set a BotFather token plus at least one Telegram user ID in `SUPER_ADMIN_IDS`. `DATA_DIR` must be a persistent writable directory. Starting with zero clubs is supported; clubs are created through Super Admin or approved user requests. Run `npm ci`, `npm test`, and `npm run build`.
 
 The first super-admin opens a private chat with the bot and sends `/start`. From the menu, add a group under **Chats** (the bot must already be in that group), then create a template, select the chat, add one or more slots, and enable it. Club owners and managers are managed under **Settings → Administrators**.
 

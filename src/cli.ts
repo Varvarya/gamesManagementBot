@@ -10,7 +10,8 @@ async function run(): Promise<void> {
     configureLogger((process.env.LOG_LEVEL?.trim() || 'info') as LogLevel);
     const command = process.argv[2];
     const dataDir = path.resolve(required('DATA_DIR'));
-    const resolved = await resolveClubStorage({ dataDir, clubId: process.env.CLUB_ID?.trim(), clubName: process.env.CLUB_NAME?.trim() });
+    const resolved = await resolveClubStorage({ dataDir, clubId: required('CLUB_ID') });
+    if (!resolved) throw new Error('CLUB_ID does not identify an existing club');
     const storage = new JsonStorage({ dataDir, storageSlug: resolved.storageSlug });
     await storage.ensureReady();
     if (command === 'migrate') {

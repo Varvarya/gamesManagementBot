@@ -10,8 +10,6 @@ async function main(): Promise<void> {
     const application = await ApplicationContext.create({
         botToken: env.botToken,
         dataDir: env.dataDir,
-        clubId: env.clubId,
-        clubName: env.clubName,
         superAdminIds: env.superAdminIds,
         defaultTimezone: env.defaultTimezone,
     });

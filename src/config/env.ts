@@ -1,6 +1,6 @@
 import path from 'node:path';
 
-export type EnvConfig = { botToken: string; dataDir: string; logLevel: 'debug' | 'info' | 'warn' | 'error'; defaultTimezone: string; clubId?: string; clubName?: string; superAdminIds: number[] };
+export type EnvConfig = { botToken: string; dataDir: string; logLevel: 'debug' | 'info' | 'warn' | 'error'; defaultTimezone: string; superAdminIds: number[] };
 
 export function loadEnv(): EnvConfig {
     const required = (name: string): string => {
@@ -15,7 +15,7 @@ export function loadEnv(): EnvConfig {
     if (!['debug', 'info', 'warn', 'error'].includes(logLevel)) throw new Error('LOG_LEVEL must be debug, info, warn, or error');
     const defaultTimezone = process.env.DEFAULT_TIMEZONE?.trim() || 'Europe/Kyiv';
     try { new Intl.DateTimeFormat('en', { timeZone: defaultTimezone }).format(); } catch { throw new Error('DEFAULT_TIMEZONE is invalid'); }
-    return { botToken, superAdminIds, dataDir: path.resolve(required('DATA_DIR')), logLevel, defaultTimezone, clubId: process.env.CLUB_ID?.trim() || undefined, clubName: process.env.CLUB_NAME?.trim() || undefined };
+    return { botToken, superAdminIds, dataDir: path.resolve(required('DATA_DIR')), logLevel, defaultTimezone };
 }
 
 export function parseSuperAdminIds(raw: string): number[] {
