@@ -20,8 +20,18 @@ type Session =
     | { state: 'super_club_select' | 'super_club_search' }
     | { state: 'super_delete_confirm'; clubId: string; clubName: string };
 
+type PreparedClubContext = {
+    clubId: string;
+    title: string;
+    storageSlug: string;
+    directoryPath: string;
+    settingsPath: string;
+    settingsClubId: string;
+};
+
 export class ClubManagementHandler {
     private readonly sessions = new Map<number, Session>();
+    private readonly clubLoadFailures = new Map<string, unknown>();
 
     constructor(
         private readonly bot: Telegraf,
@@ -32,7 +42,8 @@ export class ClubManagementHandler {
         private readonly sessionContexts: SessionContextService,
         private readonly health: ClubHealthService,
         private readonly navigation?: AdminNavigationService,
-        private readonly renderClubRoot?: (ctx: Context) => Promise<void>,
+        private readonly prepareClubContext?: (clubId: string) => Promise<PreparedClubContext>,
+        private readonly renderClubRoot?: (ctx: Context, clubId: string) => Promise<void>,
         private readonly invalidateClubContext?: (clubId: string) => void,
     ) {}
 
@@ -52,7 +63,10 @@ export class ClubManagementHandler {
         const availableClubs = [...new Map([...adminClubs, ...memberClubs].map((club) => [club.id, club])).values()];
         if (availableClubs.length > 1) return this.showUserClubSelection(ctx, availableClubs);
         if (availableClubs.length === 1 && adminClubs.some((club) => club.id === availableClubs[0].id)) {
-            this.sessionContexts.enterClubAdmin(ctx.from.id, availableClubs[0]);
+            const club = availableClubs[0];
+            try { await this.prepareClubContext?.(club.id); }
+            catch (error) { this.clubLoadFailures.set(club.id, error); return this.showClubLoadFailure(ctx, club.id, club.name, club.shortId); }
+            this.sessionContexts.enterClubAdmin(ctx.from.id, club);
             return false;
         }
         if (availableClubs.length === 1) {
@@ -101,12 +115,12 @@ export class ClubManagementHandler {
         if (activityFilter) return this.renderClubResults(ctx, (await this.health.inspectAll()).filter((item) => item.status === activityFilter[1]), `📊 ${statusLabel(activityFilter[1] as ClubHealth['status'])}`);
         if (callback === 'superadmin:problems') return this.showProblems(ctx);
         if (callback === 'superadmin:club:create') return this.startSuperCreation(ctx);
-        const superClubMatch = callback.match(/^superadmin:club:(view|open|disable|enable|delete):([a-zA-Z0-9]+)$/);
+        const superClubMatch = callback.match(/^superadmin:club:(view|open|retry|diag|disable|enable|delete):([a-zA-Z0-9]+)$/);
         if (superClubMatch) return this.handleSuperClubAction(ctx, superClubMatch[1], superClubMatch[2]);
 
         if (callback === 'mode:club_select') return this.showClubModeSelection(ctx);
         const clubModeMatch = callback.match(/^mode:club:(.+)$/);
-        if (clubModeMatch) return this.enterClubMode(ctx, clubModeMatch[1]);
+        if (clubModeMatch) return this.enterClubByShortId(ctx, clubModeMatch[1]);
         if (callback === 'mode:super') { await this.switchToSuperAdmin(ctx); return true; }
         if (callback === 'system:users') { await ctx.reply('👤 Користувачі'); return true; }
         if (callback === 'system:settings') { await ctx.reply('⚙️ Система'); return true; }
@@ -114,7 +128,7 @@ export class ClubManagementHandler {
 
         if (callback === 'onboarding:start') return this.handleStart(ctx).then(() => true as const);
         const onboardingClubMatch = callback.match(/^onboarding:club:(.+)$/);
-        if (onboardingClubMatch) return this.enterUserClub(ctx, onboardingClubMatch[1]);
+        if (onboardingClubMatch) return this.enterUserClubByShortId(ctx, onboardingClubMatch[1]);
         if (callback === 'onboarding:join') return this.showJoinClubs(ctx);
         if (callback === 'onboarding:create' || callback === AdminCallbacks.ClubRequestCreate) return this.startUserCreation(ctx);
         if (callback === AdminCallbacks.ClubRequestConfirm) return this.submitRequest(ctx);
@@ -251,28 +265,53 @@ export class ClubManagementHandler {
     private async renderClubResults(ctx: Context, clubs: ClubHealth[], title: string): Promise<true> { if (!clubs.length) { await ctx.reply(`${title}\n\nНічого не знайдено.`, Markup.inlineKeyboard([[Markup.button.callback('◀️ Назад', 'superadmin:menu')]])); return true; } const lines = clubs.map((item, index) => `${index + 1}. ${item.club.name}\n   ${item.dataAvailable === false ? '🔴 Помилка завантаження' : `${item.readinessReady ? '🟢 Готовий' : '🟡 Потрібне налаштування'} · ${item.chats} чатів · ${item.templateCount ?? item.enabledTemplates} записів розкладу`}`); await ctx.reply(`${title}\n\n${lines.join('\n\n')}\n\nВведіть номер клубу.`, Markup.inlineKeyboard([[Markup.button.callback('➕ Створити клуб', 'superadmin:club:create'), Markup.button.callback('🔎 Пошук', 'superadmin:clubs:search')], [Markup.button.callback('📊 Активність', 'superadmin:activity')], [Markup.button.callback('◀️ Назад', 'superadmin:menu')]])); return true; }
     private async showActivity(ctx: Context): Promise<true> { const clubs = await this.health.inspectAll(); const count = (status: ClubHealth['status']) => clubs.filter((item) => item.status === status).length; await ctx.reply(`📊 Активність клубів\n\n🟢 Активні: ${count('active')}\n🟡 Потребують налаштування: ${count('setup_required')}\n🔴 Неактивні: ${count('inactive')}\n⚠️ Пошкоджені: ${count('broken')}\n⛔ Вимкнені: ${count('disabled')}`, Markup.inlineKeyboard([[Markup.button.callback('🟢 Активні', 'superadmin:activity:active')], [Markup.button.callback('🟡 Не налаштовані', 'superadmin:activity:setup_required')], [Markup.button.callback('🔴 Неактивні', 'superadmin:activity:inactive')], [Markup.button.callback('⚠️ Проблеми', 'superadmin:problems')], [Markup.button.callback('◀️ Назад', 'superadmin:menu')]])); return true; }
     private async showProblems(ctx: Context): Promise<true> { const clubs = (await this.health.inspectAll()).filter((item) => item.problems.length || ['broken', 'setup_required'].includes(item.status)); const text = clubs.length ? clubs.map((item, index) => `${index + 1}. ${item.club.name}\n   ${item.problems.join('; ') || statusLabel(item.status)}`).join('\n\n') : 'Проблем не виявлено.'; await ctx.reply(`⚠️ Проблеми\n\n${text}`, Markup.inlineKeyboard([...clubs.slice(0, 8).map((item) => [Markup.button.callback(`🏸 ${item.club.name}`, `superadmin:club:view:${item.club.shortId}`)]), [Markup.button.callback('◀️ Назад', 'superadmin:menu')]])); return true; }
-    private async handleSuperClubAction(ctx: Context, action: string, shortId: string): Promise<true> { const club = await this.clubs.findByShortId(shortId); if (!club) { await ctx.reply('Клуб не знайдено в центральному реєстрі.'); return true; } if (action === 'open') return this.enterClubMode(ctx, club.id); if (action === 'disable') { await this.clubs.disable(club.id); this.invalidateClubContext?.(club.id); return this.showSuperClubDetails(ctx, await this.health.inspect({ ...club, status: 'disabled', disabledAt: new Date().toISOString() })); } if (action === 'enable') { const enabled = await this.clubs.enable(club.id); this.invalidateClubContext?.(club.id); return this.showSuperClubDetails(ctx, await this.health.inspect(enabled)); } if (action === 'delete') { this.sessions.set(ctx.from!.id, { state: 'super_delete_confirm', clubId: club.id, clubName: club.name }); await ctx.reply(`⚠️ Щоб видалити клуб і створити резервну копію, введіть точну назву:\n\n${club.name}`); return true; } return this.showSuperClubDetails(ctx, await this.health.inspect(club)); }
+    private async handleSuperClubAction(ctx: Context, action: string, shortId: string): Promise<true> { const club = await this.clubs.findByShortId(shortId); if (!club) { await ctx.reply('Клуб не знайдено в центральному реєстрі.'); return true; } if (action === 'open' || action === 'retry') return this.enterClubMode(ctx, club.id); if (action === 'diag') return this.showClubLoadDiagnostics(ctx, club.id, club.name, shortId); if (action === 'disable') { await this.clubs.disable(club.id); this.invalidateClubContext?.(club.id); return this.showSuperClubDetails(ctx, await this.health.inspect({ ...club, status: 'disabled', disabledAt: new Date().toISOString() })); } if (action === 'enable') { const enabled = await this.clubs.enable(club.id); this.invalidateClubContext?.(club.id); return this.showSuperClubDetails(ctx, await this.health.inspect(enabled)); } if (action === 'delete') { this.sessions.set(ctx.from!.id, { state: 'super_delete_confirm', clubId: club.id, clubName: club.name }); await ctx.reply(`⚠️ Щоб видалити клуб і створити резервну копію, введіть точну назву:\n\n${club.name}`); return true; } return this.showSuperClubDetails(ctx, await this.health.inspect(club)); }
     private async showSuperClubDetails(ctx: Context, item: ClubHealth): Promise<true> { const last = item.club.lastActivityAt ? new Date(item.club.lastActivityAt).toLocaleString('uk-UA', { timeZone: 'Europe/Kyiv' }) : 'немає'; const scheduler = item.schedulerStatus === 'healthy' ? '🟢 Справний' : item.schedulerStatus === 'partial' ? '🟡 Частково працює' : item.schedulerStatus === 'failed' ? '🔴 Не працює' : '— Не налаштований'; const counts = item.dataAvailable === false ? 'Дані клубу: ⚠️ недоступні' : `Чатів: ${item.chats}\nШаблонів: ${item.templateCount ?? item.enabledTemplates}\nГравців: ${item.playerCount ?? 0}\nТренувань: ${item.trainingCount ?? 0}\nАктивних тренувань: ${item.activeTrainings}`; await ctx.reply(`🏸 ${item.club.name}\n\nСтатус: ${statusLabel(item.status)}\nАдміністраторів: ${item.club.admins.length}\n${counts}\nОстання активність: ${last}\n\nСховище: ${item.status === 'broken' ? 'пошкоджене' : 'справне'}\nScheduler: ${scheduler} · ${item.restoredSchedulerJobs}/${item.expectedSchedulerJobs} jobs${item.problems.length ? `\n\n⚠️ ${item.problems.join('\n⚠️ ')}` : ''}`, Markup.inlineKeyboard([[Markup.button.callback('🔄 Відкрити як адміністратора', `superadmin:club:open:${item.club.shortId}`)], [Markup.button.callback('⚙️ Системні дані', `club:settings:${item.club.id}`)], [Markup.button.callback('📊 Активність', 'superadmin:activity')], [Markup.button.callback(item.status === 'disabled' ? '▶️ Увімкнути' : '⏸ Вимкнути', `superadmin:club:${item.status === 'disabled' ? 'enable' : 'disable'}:${item.club.shortId}`)], [Markup.button.callback('🗑 Видалити клуб', `superadmin:club:delete:${item.club.shortId}`)], [Markup.button.callback('◀️ До списку', 'superadmin:clubs')]])); return true; }
-    private async showClubModeSelection(ctx: Context): Promise<true> { const clubs = await this.clubs.findAll(); if (!clubs.length) { await ctx.reply('Клубів поки немає.', Markup.inlineKeyboard([[Markup.button.callback('➕ Створити клуб', 'superadmin:club:create')], [Markup.button.callback('⬅️ Назад', 'superadmin:menu')]])); return true; } const keyboard = Markup.inlineKeyboard(clubs.map((club) => [Markup.button.callback(`🏸 ${club.name}`, `mode:club:${club.id}`)])); if (this.navigation) await this.navigation.showFresh(ctx, 'Оберіть клуб', keyboard); else await ctx.reply('Оберіть клуб', keyboard); return true; }
+    private async showClubModeSelection(ctx: Context): Promise<true> { const clubs = await this.clubs.findAll(); if (!clubs.length) { await ctx.reply('Клубів поки немає.', Markup.inlineKeyboard([[Markup.button.callback('➕ Створити клуб', 'superadmin:club:create')], [Markup.button.callback('⬅️ Назад', 'superadmin:menu')]])); return true; } const keyboard = Markup.inlineKeyboard(clubs.map((club) => [Markup.button.callback(`🏸 ${club.name}`, `mode:club:${club.shortId}`)])); if (this.navigation) await this.navigation.showFresh(ctx, 'Оберіть клуб', keyboard); else await ctx.reply('Оберіть клуб', keyboard); return true; }
     private async showJoinClubs(ctx: Context): Promise<true> { const clubs = (await this.clubs.findAll()).filter((club) => club.status !== 'disabled'); if (!clubs.length) { await ctx.reply('🏸 Поки що немає доступних клубів.\n\nВи можете створити власний клуб.', Markup.inlineKeyboard([[Markup.button.callback('➕ Створити новий клуб', 'onboarding:create')], [Markup.button.callback('⬅️ Назад', 'onboarding:start')]])); return true; } return this.showUserClubSelection(ctx, clubs); }
-    private async showUserClubSelection(ctx: Context, clubs: Awaited<ReturnType<ClubRepository['findAll']>>): Promise<true> { await ctx.reply('Оберіть клуб', Markup.inlineKeyboard(clubs.map((club) => [Markup.button.callback(`🏸 ${club.name}`, `onboarding:club:${club.id}`)]))); return true; }
+    private async showUserClubSelection(ctx: Context, clubs: Awaited<ReturnType<ClubRepository['findAll']>>): Promise<true> { await ctx.reply('Оберіть клуб', Markup.inlineKeyboard(clubs.map((club) => [Markup.button.callback(`🏸 ${club.name}`, `onboarding:club:${club.shortId}`)]))); return true; }
+    private async enterClubByShortId(ctx: Context, token: string): Promise<true> { const club = await this.clubs.findByShortId(token) ?? await this.clubs.findById(token); if (!club) { await ctx.reply('Клуб не знайдено в центральному реєстрі.'); return true; } return this.enterClubMode(ctx, club.id); }
+    private async enterUserClubByShortId(ctx: Context, token: string): Promise<true> { const club = await this.clubs.findByShortId(token) ?? await this.clubs.findById(token); if (!club) { await ctx.reply('Клуб не знайдено.'); return true; } return this.enterUserClub(ctx, club.id); }
     private async enterUserClub(ctx: Context, clubId: string): Promise<true> {
         const club = await this.clubs.findById(clubId);
         if (!club || !ctx.from) { await ctx.reply('Клуб не знайдено.'); return true; }
         if ((await this.clubs.findAdminClubs(ctx.from.id)).some((candidate) => candidate.id === club.id)) {
-            this.sessionContexts.enterClubAdmin(ctx.from.id, club);
-            await ctx.reply(`🏸 ${club.name}`, Markup.inlineKeyboard([[Markup.button.callback('🏠 Відкрити меню клубу', AdminCallbacks.MainMenu)]]));
-            return true;
+            return this.enterClubMode(ctx, club.id);
         }
         if (!await this.clubs.userBelongsToClubId(ctx.from.id, club.id)) { await ctx.reply('⛔ У вас немає доступу до цього клубу.'); return true; }
         this.sessionContexts.enterClubUser(ctx.from.id, club);
         return this.showClubUserContext(ctx, club);
     }
     private async showClubUserContext(ctx: Context, club: { id: string; name: string }): Promise<true> { await ctx.reply(`🏸 ${club.name}\n\nВи увійшли до клубу.`, Markup.inlineKeyboard([[Markup.button.callback('🏠 Головне меню', AdminCallbacks.MainMenu)]])); return true; }
-    private async enterClubMode(ctx: Context, clubId: string): Promise<true> { const club = await this.clubs.findById(clubId); if (!club) { await ctx.reply('Клуб не знайдено.'); return true; } if (this.navigation) { await this.navigation.switchMode(ctx, SessionMode.CLUB_ADMIN, club); if (this.renderClubRoot) await this.renderClubRoot(ctx); else await ctx.reply(`🏸 ${club.name}`); } else { this.sessionContexts.enterClubAdmin(ctx.from!.id, club); await ctx.reply(`🏸 ${club.name}\n\nРежим адміністратора клубу`, Markup.inlineKeyboard([[Markup.button.callback('🏠 Відкрити меню клубу', 'm')], [Markup.button.callback('🌐 Режим суперадміністратора', 'mode:super')]])); } return true; }
+    private async enterClubMode(ctx: Context, clubId: string): Promise<true> {
+        const club = await this.clubs.findById(clubId);
+        if (!club || !ctx.from) { await ctx.reply('Клуб не знайдено.'); return true; }
+        const activeClubIdBefore = this.sessionContexts.get(ctx.from.id)?.activeClubId;
+        logger.info('club.open_debug', { telegramUserId: ctx.from.id, selectedClubId: clubId, activeClubIdBefore, registryClubFound: true, registryClubId: club.id, title: club.name, storageSlug: club.slug, repositoriesLoaded: false });
+        let prepared: PreparedClubContext | undefined;
+        try {
+            prepared = this.prepareClubContext ? await this.prepareClubContext(club.id) : undefined;
+        } catch (error) {
+            this.clubLoadFailures.set(club.id, error);
+            logger.error('club.open_debug', { telegramUserId: ctx.from.id, selectedClubId: club.id, activeClubIdBefore, registryClubFound: true, registryClubId: club.id, title: club.name, storageSlug: club.slug, repositoriesLoaded: false, activeClubIdAfter: this.sessionContexts.get(ctx.from.id)?.activeClubId, reason: loadErrorCode(error) });
+            return this.showClubLoadFailure(ctx, club.id, club.name, club.shortId);
+        }
+        this.clubLoadFailures.delete(club.id);
+        if (this.navigation) {
+            await this.navigation.switchMode(ctx, SessionMode.CLUB_ADMIN, club);
+            if (this.renderClubRoot) await this.renderClubRoot(ctx, club.id); else await ctx.reply(`🏸 ${club.name}`);
+        } else {
+            this.sessionContexts.enterClubAdmin(ctx.from.id, club);
+            await ctx.reply(`🏸 ${club.name}\n\nРежим адміністратора клубу`, Markup.inlineKeyboard([[Markup.button.callback('🏠 Відкрити меню клубу', 'm')], [Markup.button.callback('🌐 Режим суперадміністратора', 'mode:super')]]));
+        }
+        logger.info('club.open_debug', { telegramUserId: ctx.from.id, selectedClubId: club.id, activeClubIdBefore, registryClubFound: true, registryClubId: club.id, title: club.name, storageSlug: club.slug, directoryPath: prepared?.directoryPath, directoryExists: true, settingsPath: prepared?.settingsPath, settingsExists: true, settingsClubId: prepared?.settingsClubId, repositoriesLoaded: true, contextClubId: prepared?.clubId, activeClubIdAfter: this.sessionContexts.get(ctx.from.id)?.activeClubId });
+        return true;
+    }
+    private async showClubLoadFailure(ctx: Context, clubId: string, clubName: string, shortId: string): Promise<true> { await ctx.reply(`⚠️ Не вдалося завантажити дані клубу.\n\nКлуб:\n${clubName}`, Markup.inlineKeyboard([[Markup.button.callback('🔄 Спробувати ще раз', `superadmin:club:retry:${shortId}`)], [Markup.button.callback('🩺 Діагностика', `superadmin:club:diag:${shortId}`)], [Markup.button.callback('◀️ До списку клубів', 'superadmin:clubs')]])); return true; }
+    private async showClubLoadDiagnostics(ctx: Context, clubId: string, clubName: string, shortId: string): Promise<true> { const reason = loadErrorLabel(this.clubLoadFailures.get(clubId)); await ctx.reply(`⚠️ ${clubName}\n\nПричина:\n${reason}`, Markup.inlineKeyboard([[Markup.button.callback('🔄 Повторити', `superadmin:club:retry:${shortId}`)], [Markup.button.callback('◀️ Назад', 'superadmin:clubs')]])); return true; }
     private async switchToSuperAdmin(ctx: Context): Promise<void> { if (this.navigation) await this.navigation.switchMode(ctx, SessionMode.SUPER_ADMIN); else { this.sessionContexts.enterSuperAdmin(ctx.from!.id); } await this.showSuperAdminMenu(ctx); }
     private async showClubList(ctx: Context): Promise<true> { const clubs = await this.clubs.findAll(); await ctx.reply(clubs.length ? '🏸 Клуби' : 'Клубів ще немає.', Markup.inlineKeyboard([...clubs.map((club) => [Markup.button.callback(`🏸 ${club.name}`, `club:view:${club.id}`)]), [Markup.button.callback('⬅️ Назад', 'clubs:menu')]])); return true; }
-    private async showClub(ctx: Context, id: string): Promise<true> { const club = await this.clubs.findById(id); if (!club) { await ctx.reply('Клуб не знайдено.'); return true; } await ctx.reply(`🏸 ${club.name}`, Markup.inlineKeyboard([[Markup.button.callback('🔄 Відкрити як адміністратора', `mode:club:${id}`)], [Markup.button.callback('⚙️ Налаштування', `club:settings:${id}`)], [Markup.button.callback('🗑 Видалити клуб', `club:delete:${id}`)], [Markup.button.callback('⬅️ Назад', 'clubs:list')]])); return true; }
+    private async showClub(ctx: Context, id: string): Promise<true> { const club = await this.clubs.findById(id); if (!club) { await ctx.reply('Клуб не знайдено.'); return true; } await ctx.reply(`🏸 ${club.name}`, Markup.inlineKeyboard([[Markup.button.callback('🔄 Відкрити як адміністратора', `mode:club:${club.shortId}`)], [Markup.button.callback('⚙️ Налаштування', `club:settings:${id}`)], [Markup.button.callback('🗑 Видалити клуб', `club:delete:${id}`)], [Markup.button.callback('⬅️ Назад', 'clubs:list')]])); return true; }
     private async showClubSettings(ctx: Context, id: string): Promise<true> { const club = await this.clubs.findById(id); if (!club) { await ctx.reply('Клуб не знайдено.'); return true; } await ctx.reply(`⚙️ Налаштування клубу\n\nНазва: ${club.name}\nSlug: ${club.slug}\nClub ID: ${club.id}`, Markup.inlineKeyboard([[Markup.button.callback('⬅️ Назад', `club:view:${id}`)]])); return true; }
     private async startSuperCreation(ctx: Context): Promise<true> { this.sessions.set(ctx.from!.id, { state: 'super_name' }); await ctx.reply('🏸 Створення клубу\n\nВведіть назву клубу.'); return true; }
     private async createImmediately(ctx: Context): Promise<true> { const session = this.sessions.get(ctx.from!.id); if (!session || session.state !== 'super_confirm') { await ctx.reply('Дані створення застаріли.'); return true; } const club = await this.clubs.create({ name: session.clubName, slug: session.slug, firstAdminTelegramId: ctx.from!.id }); this.sessions.delete(ctx.from!.id); return this.showClub(ctx, club.id); }
@@ -298,3 +337,6 @@ export class ClubManagementHandler {
 function statusLabel(status: ClubHealth['status']): string {
     return status === 'active' ? '🟢 Активний' : status === 'setup_required' ? '🟡 Не налаштований' : status === 'inactive' ? '🔴 Неактивний' : status === 'disabled' ? '⛔ Вимкнений' : '🔴 Пошкоджений';
 }
+
+function loadErrorCode(error: unknown): string { return error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' ? error.code : 'REPOSITORY_LOAD_FAILED'; }
+function loadErrorLabel(error: unknown): string { switch (loadErrorCode(error)) { case 'CLUB_NOT_IN_REGISTRY': return 'Клуб не знайдено в реєстрі'; case 'STORAGE_NOT_FOUND': return 'Папку даних не знайдено'; case 'SETTINGS_NOT_FOUND': return 'Файл settings.json не знайдено'; case 'SETTINGS_INVALID': return 'Файл settings.json пошкоджено'; case 'CLUB_ID_MISMATCH': return 'settings.clubId не збігається з реєстром'; case 'STORAGE_SLUG_MISMATCH': return 'Папка клубу не збігається з реєстром'; default: return 'Не вдалося завантажити дані клубу'; } }

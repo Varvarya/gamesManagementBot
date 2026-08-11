@@ -171,15 +171,12 @@ export class ApplicationContext {
             this.sessionContexts,
             this.clubHealth,
             this.navigation,
-            async (ctx) => {
-                const selectedClubId = ctx.from ? this.sessionContexts.get(ctx.from.id)?.activeClubId : undefined;
-                if (!selectedClubId) throw new Error('No active club selected');
-                try { await (await this.getClubRuntime(selectedClubId)).menu.showMain(ctx); }
-                catch (error) {
-                    logger.error('club.context_activation_failed', { clubId: selectedClubId, reason: error instanceof Error ? error.message : String(error) });
-                    await ctx.reply('⚠️ Не вдалося завантажити дані обраного клубу. Дані іншого клубу не показано.');
-                }
+            async (clubId) => {
+                const runtime = await this.getClubRuntime(clubId);
+                const settings = await runtime.context.repositories.settings.get();
+                return { clubId: runtime.context.clubId, title: runtime.context.title, storageSlug: runtime.context.storageSlug, directoryPath: runtime.context.directoryPath, settingsPath: runtime.context.repositories.settings.getFilePath(), settingsClubId: settings.clubId };
             },
+            async (ctx, clubId) => { await (await this.getClubRuntime(clubId)).menu.showMain(ctx); },
             (clubId) => this.invalidateClubRuntime(clubId),
         );
 
@@ -298,7 +295,17 @@ export class ApplicationContext {
 
     private async getClubRuntime(clubId: string): Promise<ClubHandlerRuntime> {
         const existing = this.clubRuntimes.get(clubId);
-        if (existing) return existing;
+        if (existing) {
+            try {
+                const [runtime, validated] = await Promise.all([existing, this.clubContexts.getClubContext(clubId)]);
+                if (runtime.context.clubId !== validated.clubId || runtime.context.directoryPath !== validated.directoryPath || runtime.context.repositories.clubId !== clubId) throw new Error('Cached application runtime does not match selected club');
+                return runtime;
+            } catch (error) {
+                logger.warn('club.runtime_cache_invalid', { clubId, reason: error instanceof Error ? error.message : String(error) });
+                this.invalidateClubRuntime(clubId);
+                // Continue with one fresh load. No other club runtime is ever used.
+            }
+        }
         const loading = this.clubContexts.getClubContext(clubId).then((context) => this.createClubRuntime(context));
         this.clubRuntimes.set(clubId, loading);
         try { return await loading; }

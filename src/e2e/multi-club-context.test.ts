@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, rename } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { ClubContextManager } from '../app/club-context-manager';
+import { ClubContextLoadError } from '../app/club-context-manager';
 import { ClubRepository } from '../storage/repositories/club.repository';
 import { SessionContextService } from '../bot/session/session-context.service';
 import { ClubHealthService } from '../domain/clubs/club-health.service';
@@ -60,6 +61,43 @@ test('settings clubId mismatch fails without falling back and health is unavaila
     const result = await new ClubHealthService(clubs, root, 30, manager).inspect(club);
     assert.equal(result.dataAvailable, false);
     assert.equal(result.status, 'broken');
+});
+
+test('missing storage and corrupt settings return specific failures without creating empty club data', async (t) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'gamesbot-context-failures-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const clubs = new ClubRepository(root);
+    const missing = await clubs.create({ name: 'Missing', slug: 'missing', firstAdminTelegramId: 1 });
+    await rename(path.join(root, 'missing'), path.join(root, 'old-missing'));
+    await assert.rejects(new ClubContextManager(root, 'Europe/Kyiv', clubs).getClubContext(missing.id), (error) => error instanceof ClubContextLoadError && error.code === 'STORAGE_NOT_FOUND');
+    const corrupt = await clubs.create({ name: 'Corrupt', slug: 'corrupt', firstAdminTelegramId: 2 });
+    await writeFile(path.join(root, corrupt.slug, 'settings.json'), '{broken', 'utf8');
+    await assert.rejects(new ClubContextManager(root, 'Europe/Kyiv', clubs).getClubContext(corrupt.id), (error) => error instanceof ClubContextLoadError && error.code === 'SETTINGS_INVALID');
+});
+
+test('stale cached context is invalidated and retried exactly once', async (t) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'gamesbot-context-cache-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const clubs = new ClubRepository(root); const club = await clubs.create({ name: 'Cached', slug: 'cached', firstAdminTelegramId: 1 });
+    const manager = new ClubContextManager(root, 'Europe/Kyiv', clubs); const first = await manager.getClubContext(club.id);
+    await rm(path.join(root, club.slug, 'settings.json'));
+    await assert.rejects(manager.getClubContext(club.id), (error) => error instanceof ClubContextLoadError && error.code === 'SETTINGS_NOT_FOUND');
+    assert.equal(manager.hasClubContext(club.id), false); assert.equal(first.clubId, club.id);
+});
+
+test('cache entry keyed as B but containing A is rejected and B is loaded', async (t) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'gamesbot-context-cross-key-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const clubs = new ClubRepository(root);
+    const a = await clubs.create({ name: 'A', slug: 'a', firstAdminTelegramId: 1 });
+    const b = await clubs.create({ name: 'B', slug: 'b', firstAdminTelegramId: 2 });
+    const manager = new ClubContextManager(root, 'Europe/Kyiv', clubs);
+    const aContext = await manager.getClubContext(a.id);
+    (manager as unknown as { contexts: Map<string, Promise<typeof aContext>> }).contexts.set(b.id, Promise.resolve(aContext));
+    const bContext = await manager.getClubContext(b.id);
+    assert.equal(bContext.clubId, b.id);
+    assert.equal(bContext.storageSlug, 'b');
+    assert.notEqual(bContext.repositories, aContext.repositories);
 });
 
 test('scheduler job identity contains its club and uses that club context', async (t) => {
