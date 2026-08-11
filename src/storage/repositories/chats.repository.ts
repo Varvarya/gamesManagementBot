@@ -92,6 +92,7 @@ export class ChatsRepository {
         }
 
         const chat: ChatConfig = {
+            ...input,
             id: input.id,
             name: input.name.trim(),
             enabled:
@@ -124,6 +125,7 @@ export class ChatsRepository {
 
         const updated: ChatConfig = {
             ...existing,
+            ...input,
 
             name:
                 input.name !== undefined
@@ -153,6 +155,8 @@ export class ChatsRepository {
             this.chats[key];
 
         const chat: ChatConfig = {
+            ...existing,
+            ...input,
             id: input.id,
             name: input.name.trim(),
 

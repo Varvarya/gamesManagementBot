@@ -30,9 +30,7 @@ export class AdminPlayerHandler {
     async showPlayers(ctx: Context): Promise<void> {
         const all = await this.services.repositories.players.list();
         const fresh = all.filter((player) => !player.isConfirmed && player.isActive).length;
-        const inactive = all.filter((player) => !player.isActive).length;
-        const active = all.length - inactive;
-        await this.services.adminUi.show(ctx, ['👥 Гравці', '', `Всього: ${all.length}`, `Активних: ${active}`, `Нових: ${fresh}`, `Неактивних: ${inactive}`, '', 'Що ви хочете зробити?'].join('\n'), createPlayersKeyboard(fresh));
+        await this.services.adminUi.show(ctx, ['👥 Гравці', '', `Всього: ${all.length}`, `Нових: ${fresh}`].join('\n'), createPlayersKeyboard(fresh));
     }
 
     async showUnconfirmed(ctx: Context): Promise<void> {

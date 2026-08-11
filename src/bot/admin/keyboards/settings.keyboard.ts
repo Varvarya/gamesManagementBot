@@ -5,19 +5,24 @@ import { AdminCallbacks } from '../callbacks/admin-callbacks';
 export function createSettingsKeyboard(cleanChatMode: boolean) {
     const edit = AdminCallbacks.SettingsEditPrefix;
     return Markup.inlineKeyboard([
-        [Markup.button.callback('🏸 Назва клубу', `${edit}title`), Markup.button.callback('🌍 Часовий пояс', `${edit}timezone`)],
-        [Markup.button.callback('👮 Адміністратори', AdminCallbacks.SettingsAdmins), Markup.button.callback(cleanChatMode ? '🧹 Очищення: увімкнено' : '🧹 Очищення: вимкнено', AdminCallbacks.SettingsToggleCleanChat)],
-        [Markup.button.callback('📊 Статус', AdminCallbacks.SettingsStatus)],
+        [Markup.button.callback('👥 Адміністратори', AdminCallbacks.SettingsAdmins)],
+        [Markup.button.callback('🏷 Назва клубу', `${edit}title`), Markup.button.callback('🕒 Часовий пояс', `${edit}timezone`)],
+        [Markup.button.callback('🧹 Очищення чату', AdminCallbacks.SettingsToggleCleanChat)],
+        [Markup.button.callback('✅ Перевірка налаштувань', AdminCallbacks.Readiness)],
         [Markup.button.callback('◀️ Назад', AdminCallbacks.Back)],
     ]);
 }
 
-export function createAdminsKeyboard(admins: ClubAdmin[]) {
+export function createAdminsKeyboard(canManage: boolean, canTransfer: boolean) {
     return Markup.inlineKeyboard([
-        ...admins.map((admin) => [Markup.button.callback(`➖ ${admin.telegramUserId} (${admin.role})`, `${AdminCallbacks.SettingsRemoveAdminPrefix}${admin.telegramUserId}`)]),
-        [Markup.button.callback('➕ Додати адміністратора', AdminCallbacks.SettingsAddAdmin)],
-        [Markup.button.callback('◀️ Налаштування', AdminCallbacks.Back)],
+        ...(canManage ? [[Markup.button.callback('➕ Додати адміністратора', AdminCallbacks.SettingsAddAdmin), Markup.button.callback('➖ Видалити адміністратора', AdminCallbacks.SettingsRemoveAdmin)]] : []),
+        ...(canTransfer ? [[Markup.button.callback('👑 Передати owner', AdminCallbacks.SettingsTransferOwner)]] : []),
+        [Markup.button.callback('◀️ Назад', AdminCallbacks.Back)],
     ]);
+}
+
+export function createAdminConfirmationKeyboard(confirmCallback: string) {
+    return Markup.inlineKeyboard([[Markup.button.callback('✅ Підтвердити', confirmCallback)], [Markup.button.callback('❌ Скасувати', AdminCallbacks.SettingsAdmins)]]);
 }
 
 export function createStatusKeyboard() {

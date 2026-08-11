@@ -10,18 +10,23 @@ import {
     createUnknownTrainingPlayerKeyboard,
     createNewTrainingPlayerPreviewKeyboard,
     createTrainingPlayerDuplicateKeyboard,
+    createTrainingCreateConfirmKeyboard,
+    createActiveTrainingsKeyboard,
+    createTrainingRemoveSelectionKeyboard,
+    createTrainingRemovePlacesKeyboard,
 } from '../keyboards/training.keyboard';
 import { formatDate, formatTimeRange, isTrainingParticipantListTruncated, renderTrainingCard } from '../ui/admin-formatters';
 import { Training } from '../../../domain/trainings/training.types';
 import { AdminFlowState } from './admin-flow.types';
 import { validateReservedPlaces } from '../../../domain/trainings/reserved-places';
+import { getZonedNow } from '../../../domain/templates/template-scheduler.service';
 
 type TrainingPlayerAction =
     | 'add'
     | 'remove';
 
 export class TrainingFlowHandler {
-    readonly textStates: readonly AdminFlowState[] = ['waiting_training_add_player', 'waiting_training_remove_player', 'waiting_training_reservation_places', 'waiting_training_new_player_name', 'waiting_training_new_player_places', 'waiting_training_new_player_confirmation', 'waiting_training_archive_search'];
+    readonly textStates: readonly AdminFlowState[] = ['waiting_training_add_player', 'waiting_training_remove_player', 'waiting_training_reservation_places', 'waiting_training_new_player_name', 'waiting_training_new_player_places', 'waiting_training_new_player_confirmation', 'waiting_training_archive_search', 'waiting_training_search', 'waiting_training_edit_value', 'waiting_training_create'];
     constructor(
         private readonly services: ServicesContext,
         private readonly publisher: TrainingPublisherService,
@@ -32,6 +37,12 @@ export class TrainingFlowHandler {
     ): boolean {
         return (
             callback === AdminCallbacks.ArchiveSearch ||
+            callback === AdminCallbacks.TrainingSearch ||
+            callback === AdminCallbacks.TrainingCreate ||
+            callback === AdminCallbacks.TrainingCreatePublishNow ||
+            callback === AdminCallbacks.TrainingCreateDraft ||
+            callback === AdminCallbacks.TrainingCreateSchedule ||
+            callback.startsWith(AdminCallbacks.TrainingEditFieldPrefix) ||
             callback.startsWith(
                 AdminCallbacks.TrainingAddPlayerPrefix,
             ) ||
@@ -44,6 +55,7 @@ export class TrainingFlowHandler {
             callback.startsWith(
                 AdminCallbacks.TrainingSelectRemovePlayerPrefix,
             ) ||
+            callback.startsWith(AdminCallbacks.TrainingRemovePlacesPrefix) ||
             callback === AdminCallbacks.TrainingNewPlayerPreview ||
             callback === AdminCallbacks.TrainingNewPlayerEdit ||
             callback === AdminCallbacks.TrainingNewPlayerSearchAgain ||
@@ -68,6 +80,39 @@ export class TrainingFlowHandler {
             const searchQuery = this.services.adminFlow.getData(adminId).searchQuery ?? '';
             this.services.adminFlow.transition(adminId, 'waiting_training_archive_search', { searchQuery });
             await this.services.adminUi.show(ctx, ['🔎 Пошук в архіві', '', 'Надішліть частину назви або дату.', 'Наприклад: Вечірнє або 2026-08-04', searchQuery ? `Поточний запит: «${searchQuery}»` : ''].filter(Boolean).join('\n'), createFlowNavigationKeyboard(AdminCallbacks.ArchivedTrainings, AdminCallbacks.ActiveTrainings));
+            return;
+        }
+
+        if (callback === AdminCallbacks.TrainingSearch) {
+            this.services.adminFlow.start(adminId, 'waiting_training_search');
+            await this.services.adminUi.show(ctx, '🔎 Знайти тренування\n\nНадішліть дату, назву або статус: відкриті, закриті, скасовані.', createFlowNavigationKeyboard(AdminCallbacks.ActiveTrainings, AdminCallbacks.MainMenu));
+            return;
+        }
+        if (callback === AdminCallbacks.TrainingCreate) {
+            this.services.adminFlow.start(adminId, 'waiting_training_create');
+            await this.services.adminUi.show(ctx, '➕ Створити тренування\n\nНадішліть одним повідомленням:\nДата: 14.08.2026\nНазва: Відкрите тренування\nЧас: 18:00-20:00\nМісця: 12\nМінімум: 4\nЧат: Основний\nПублікація: зараз\n\nДля відкладеної публікації: 13.08.2026 12:00', createFlowNavigationKeyboard(AdminCallbacks.ActiveTrainings, AdminCallbacks.MainMenu));
+            return;
+        }
+        if (callback === AdminCallbacks.TrainingCreatePublishNow || callback === AdminCallbacks.TrainingCreateDraft || callback === AdminCallbacks.TrainingCreateSchedule) {
+            const pending = this.services.adminFlow.getData(adminId).pendingOneOffTraining as Parameters<TrainingPublisherService['publishManual']>[0] | undefined;
+            if (!pending) throw new Error('Дані створення вже неактуальні.');
+            let training = callback === AdminCallbacks.TrainingCreatePublishNow ? await this.publisher.publishManual(pending) : await this.services.trainings.createDraft(pending);
+            if (callback === AdminCallbacks.TrainingCreateSchedule) { const at = this.services.adminFlow.getData(adminId).pendingTrainingPublicationAt; if (!at) throw new Error('Не вказано час публікації.'); training.scheduledPublicationAt = at; training = await this.services.trainings.save(training); const settings = await this.services.settings.get(); this.services.scheduler.rescheduleOneOff({ id: `club:${training.clubId}:training:${training.id}`, date: at.slice(0, 10), time: at.slice(11, 16), timezone: settings.timezone }, async () => { await this.publisher.publishExistingDraft(training.id); }); }
+            this.services.adminFlow.finish(adminId);
+            await this.showTrainingCard(ctx, training.id);
+            return;
+        }
+        if (callback.startsWith(AdminCallbacks.TrainingEditFieldPrefix)) {
+            const field = callback.slice(AdminCallbacks.TrainingEditFieldPrefix.length) as NonNullable<ReturnType<ServicesContext['adminFlow']['getData']>['trainingEditField']>;
+            const data = this.services.adminFlow.getData(adminId);
+            if (!data.trainingId) throw new Error('Тренування вже неактуальне.');
+            if (field === 'chat') {
+                await this.services.adminUi.replaceWithError(ctx, 'Зміну чату для вже створеного тренування виконуйте лише до публікації.', createFlowNavigationKeyboard(`${AdminCallbacks.TrainingPrefix}${data.trainingId}`, AdminCallbacks.ActiveTrainings));
+                return;
+            }
+            this.services.adminFlow.transition(adminId, 'waiting_training_edit_value', { trainingEditField: field });
+            const prompts = { time: 'Новий час, наприклад 19:00-21:00', limit: 'Новий ліміт місць', minimum: 'Новий мінімум гравців', location: 'Нове місце', title: 'Нова назва', chat: '' };
+            await this.services.adminUi.show(ctx, `✏️ ${prompts[field]}`, createFlowNavigationKeyboard(`${AdminCallbacks.TrainingPrefix}${data.trainingId}`, AdminCallbacks.ActiveTrainings));
             return;
         }
 
@@ -105,6 +150,13 @@ export class TrainingFlowHandler {
         if (callback === AdminCallbacks.TrainingNewPlayerCreateAnyway) {
             await this.createNewPlayerAndRegister(ctx, adminId);
             return;
+        }
+
+        if (callback.startsWith(AdminCallbacks.TrainingRemovePlacesPrefix)) {
+            const data = this.services.adminFlow.getData(adminId); if (!data.trainingId || !data.playerId) throw new Error('Дані вибору вже неактуальні.');
+            const training = await this.services.trainings.getRequired(data.trainingId); const entry = [...training.participants, ...training.waitlist].find((item) => item.playerId === data.playerId); if (!entry) throw new Error('Гравця вже немає у списку.');
+            const raw = callback.slice(AdminCallbacks.TrainingRemovePlacesPrefix.length); const places = raw === 'all' ? entry.places : Number(raw);
+            await this.apply(training.id, entry.playerId, 'remove', places); await this.showCompleted(ctx, adminId, training.id); return;
         }
 
         if (
@@ -150,6 +202,14 @@ export class TrainingFlowHandler {
         const trainingId =
             callback.replace(prefix, '');
 
+        if (action === 'remove') {
+            const training = await this.services.trainings.getRequired(trainingId);
+            this.services.adminFlow.transition(adminId, 'waiting_training_remove_player', { trainingId });
+            const entries = [...training.participants, ...training.waitlist];
+            await this.services.adminUi.show(ctx, ['➖ Прибрати гравця', '', ...(entries.length ? entries.map((entry, index) => `${index + 1}. ${entry.displayName}${entry.places > 1 ? ` · ${entry.places} місця` : ''}${entry.status === 'waiting' ? ' · очікує' : ''}`) : ['Список порожній.'])].join('\n'), createTrainingRemoveSelectionKeyboard(training));
+            return;
+        }
+
         this.services.adminFlow.transition(
             adminId,
             action === 'add'
@@ -191,6 +251,9 @@ export class TrainingFlowHandler {
             state === 'waiting_training_new_player_places' ||
             state === 'waiting_training_new_player_confirmation' ||
             state === 'waiting_training_archive_search'
+            || state === 'waiting_training_search'
+            || state === 'waiting_training_edit_value'
+            || state === 'waiting_training_create'
         );
     }
 
@@ -210,6 +273,9 @@ export class TrainingFlowHandler {
             );
 
         const state = this.services.adminFlow.getState(adminId);
+        if (state === 'waiting_training_search') { await this.searchTrainings(ctx, adminId, text); return; }
+        if (state === 'waiting_training_edit_value') { await this.editTraining(ctx, adminId, text); return; }
+        if (state === 'waiting_training_create') { await this.previewOneOff(ctx, adminId, text); return; }
         if (state === 'waiting_training_new_player_confirmation') {
             await this.services.adminUi.notice(ctx, 'Скористайтеся кнопками під попереднім переглядом.');
             return;
@@ -404,7 +470,8 @@ export class TrainingFlowHandler {
 
     private async askReservedPlaces(ctx: Context, adminId: number, trainingId: string, playerId: string, playerName: string, action: TrainingPlayerAction): Promise<void> {
         this.services.adminFlow.transition(adminId, 'waiting_training_reservation_places', { trainingId, playerId, reservationAction: action });
-        await this.services.adminUi.show(ctx, `${action === 'add' ? '➕' : '➖'} ${playerName}\n\nСкільки місць ${action === 'add' ? 'зарезервувати' : 'скасувати'}? Надішліть число від 1 до 4.`, createFlowNavigationKeyboard(`${AdminCallbacks.TrainingPrefix}${trainingId}`, AdminCallbacks.ActiveTrainings));
+        if (action === 'remove') { const training = await this.services.trainings.getRequired(trainingId); const entry = [...training.participants, ...training.waitlist].find((item) => item.playerId === playerId); if (!entry) throw new Error('Гравця вже немає у списку.'); await this.services.adminUi.show(ctx, `${playerName}\n${entry.places} ${entry.places === 1 ? 'місце' : 'місця'}\n\nСкільки зняти?`, createTrainingRemovePlacesKeyboard(trainingId, entry.places)); return; }
+        await this.services.adminUi.show(ctx, `➕ ${playerName}\n\nСкільки місць зарезервувати? Надішліть число від 1 до 4.`, createFlowNavigationKeyboard(`${AdminCallbacks.TrainingPrefix}${trainingId}`, AdminCallbacks.ActiveTrainings));
     }
 
     private async showCompleted(ctx: Context, adminId: number, trainingId: string): Promise<void> {
@@ -454,6 +521,51 @@ export class TrainingFlowHandler {
         }
     }
 
+    private async searchTrainings(ctx: Context, adminId: number, query: string): Promise<void> {
+        const normalized = query.trim().toLocaleLowerCase('uk-UA');
+        const settings = await this.services.settings.get();
+        const today = getZonedNow(new Date(), settings.timezone).date;
+        const tomorrowDate = new Date(`${today}T00:00:00Z`); tomorrowDate.setUTCDate(tomorrowDate.getUTCDate() + 1);
+        const tomorrow = tomorrowDate.toISOString().slice(0, 10);
+        const dateHint = normalized === 'сьогодні' ? today : normalized === 'завтра' ? tomorrow : /^\d{1,2}\.\d{1,2}$/.test(normalized) ? normalized : undefined;
+        const status = normalized.startsWith('відкрит') ? 'open' : normalized.startsWith('закрит') ? 'closed' : normalized.startsWith('скасован') ? 'cancelled' : undefined;
+        const trainings = (await this.services.repositories.trainings.list()).filter((item) => {
+            const displayDate = `${item.date.slice(8, 10)}.${item.date.slice(5, 7)}`;
+            return status ? item.status === status : dateHint ? item.date === dateHint || displayDate === dateHint : item.title.toLocaleLowerCase('uk-UA').includes(normalized);
+        }).sort((a, b) => a.date.localeCompare(b.date) || a.startTime.localeCompare(b.startTime)).slice(0, 12);
+        this.services.adminFlow.finish(adminId);
+        await this.services.adminUi.show(ctx, ['🔎 Результати', '', ...(trainings.length ? trainings.map((item, index) => `${index + 1}. ${item.date} · ${item.startTime} · ${item.title}`) : ['Нічого не знайдено.'])].join('\n'), createActiveTrainingsKeyboard(trainings));
+    }
+
+    private async editTraining(ctx: Context, adminId: number, value: string): Promise<void> {
+        const data = this.services.adminFlow.getData(adminId); if (!data.trainingId || !data.trainingEditField) throw new Error('Дані редагування вже неактуальні.');
+        const training = await this.services.trainings.getRequired(data.trainingId);
+        if (!['open', 'closed', 'draft'].includes(training.status)) throw new Error('Це тренування вже не можна змінити.');
+        const field = data.trainingEditField;
+        if (field === 'time') { const match = value.trim().match(/^([0-2]\d:[0-5]\d)\s*[-–—]\s*([0-2]\d:[0-5]\d)$/); if (!match) throw new Error('Введіть час у форматі 19:00-21:00.'); training.startTime = match[1]; training.endTime = match[2]; }
+        else if (field === 'limit') { const limit = Number(value); if (!Number.isInteger(limit) || limit < 1) throw new Error('Ліміт має бути додатним цілим числом.'); training.placesLimit = limit; }
+        else if (field === 'minimum') { const minimum = Number(value); if (!Number.isInteger(minimum) || minimum < 0 || minimum > training.placesLimit) throw new Error('Мінімум має бути від 0 до поточного ліміту.'); training.minPlayers = minimum; }
+        else if (field === 'title') { if (!value.trim()) throw new Error('Назва не може бути порожньою.'); training.title = value.trim(); }
+        else if (field === 'location') training.location = value.trim() || undefined;
+        await this.services.trainings.save(training);
+        this.services.adminFlow.finish(adminId);
+        await this.showTrainingCard(ctx, training.id);
+    }
+
+    private async previewOneOff(ctx: Context, adminId: number, text: string): Promise<void> {
+        const values = new Map(text.split('\n').map((line) => { const index = line.indexOf(':'); return index < 0 ? ['', ''] : [line.slice(0, index).trim().toLocaleLowerCase('uk-UA'), line.slice(index + 1).trim()]; }));
+        const date = parseAdminDate(values.get('дата') ?? '');
+        const title = values.get('назва')?.trim(); const range = (values.get('час') ?? '').match(/^([0-2]\d:[0-5]\d)\s*[-–—]\s*([0-2]\d:[0-5]\d)$/);
+        const placesLimit = Number(values.get('місця')); const minPlayers = Number(values.get('мінімум'));
+        if (!title || !range || !Number.isInteger(placesLimit) || placesLimit < 1 || !Number.isInteger(minPlayers) || minPlayers < 0 || minPlayers > placesLimit) throw new Error('Перевірте дату, назву, час, місця та мінімум.');
+        const chats = await this.services.chats.getEnabled(); const chatName = values.get('чат')?.toLocaleLowerCase('uk-UA'); const chat = chats.find((item) => item.name.toLocaleLowerCase('uk-UA') === chatName) ?? (chats.length === 1 ? chats[0] : undefined);
+        if (!chat) throw new Error('Не вдалося однозначно знайти активний чат.');
+        const publicationRaw = values.get('публікація'); const publicationAt = publicationRaw && publicationRaw.toLocaleLowerCase('uk-UA') !== 'зараз' ? parsePublicationAt(publicationRaw) : undefined;
+        const pending = { clubId: this.services.repositories.clubId, chatId: chat.id, title, date, startTime: range[1], endTime: range[2], placesLimit, minPlayers };
+        this.services.adminFlow.transition(adminId, 'waiting_training_create', { pendingOneOffTraining: pending, pendingTrainingPublicationAt: publicationAt });
+        await this.services.adminUi.show(ctx, `🏸 ${title}\n${formatDate(date)} · ${range[1]}–${range[2]}\n${placesLimit} місць · мінімум ${minPlayers}\nЧат: ${chat.name}\nПублікація: ${publicationAt ? publicationAt.replace('T', ' ') : 'зараз'}\n\n➕ Разове тренування`, createTrainingCreateConfirmKeyboard(Boolean(publicationAt)));
+    }
+
     private async showTrainingCard(ctx: Context, trainingId: string): Promise<void> {
         const training = await this.services.trainings.getRequired(trainingId);
         const card = await this.renderResolvedCard(training);
@@ -478,3 +590,6 @@ export class TrainingFlowHandler {
         };
     }
 }
+
+function parseAdminDate(value: string): string { const iso = value.match(/^\d{4}-\d{2}-\d{2}$/) ? value : (() => { const match = value.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/); return match ? `${match[3]}-${match[2].padStart(2, '0')}-${match[1].padStart(2, '0')}` : ''; })(); if (!iso || Number.isNaN(Date.parse(`${iso}T00:00:00Z`))) throw new Error('Некоректна дата.'); return iso; }
+function parsePublicationAt(value: string): string { const match = value.trim().match(/^(\d{1,2}\.\d{1,2}\.\d{4}|\d{4}-\d{2}-\d{2})\s+([0-2]\d:[0-5]\d)$/); if (!match) throw new Error('Публікація має бути «зараз» або датою й часом.'); return `${parseAdminDate(match[1])}T${match[2]}:00` ; }

@@ -19,10 +19,12 @@ export function createScheduleKeyboard(
         ]),
         [
             Markup.button.callback(
-                '➕ Новий шаблон',
+                '➕ Додати',
                 AdminCallbacks.CreateTemplate,
             ),
+            Markup.button.callback('📌 Винятки', AdminCallbacks.ScheduleExceptions),
         ],
+        [Markup.button.callback('👀 Найближчі тренування', AdminCallbacks.ScheduleUpcoming)],
         [
             Markup.button.callback(
                 '◀️ Назад',
@@ -45,8 +47,8 @@ export function createTemplateKeyboard(
         [
             Markup.button.callback(
                 template.enabled
-                    ? '⏸ Вимкнути'
-                    : '▶️ Увімкнути',
+                    ? '⏸ Призупинити'
+                    : '▶️ Відновити',
                 `${AdminCallbacks.TemplateTogglePrefix}${template.id}`,
             ),
         ],
@@ -71,17 +73,21 @@ export function createTemplateDeleteKeyboard(
     return Markup.inlineKeyboard([
         [
             Markup.button.callback(
-                '✅ Підтвердити видалення',
+                '🗑 Видалити',
                 `${AdminCallbacks.TemplateDeleteConfirmPrefix}${templateId}`,
             ),
         ],
         [
             Markup.button.callback(
-                '◀️ Назад',
+                '❌ Скасувати',
                 `${AdminCallbacks.TemplatePrefix}${templateId}`,
             ),
         ],
     ]);
+}
+
+export function createTemplateDeleteWithExceptionsKeyboard(templateId: string) {
+    return Markup.inlineKeyboard([[Markup.button.callback('🗑 Видалити разом', `${AdminCallbacks.TemplateDeleteWithExceptionsPrefix}${templateId}`)], [Markup.button.callback('↩️ Скасувати', `${AdminCallbacks.TemplatePrefix}${templateId}`)]]);
 }
 
 export function createTemplatePreviewKeyboard(

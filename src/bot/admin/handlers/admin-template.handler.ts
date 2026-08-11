@@ -10,6 +10,7 @@ import {
     createScheduleKeyboard,
     createTemplateDeleteKeyboard,
     createTemplateKeyboard,
+    createTemplateDeleteWithExceptionsKeyboard,
 } from '../keyboards/template.keyboard';
 
 import {
@@ -35,6 +36,7 @@ export class AdminTemplateHandler {
                 AdminCallbacks.TemplateTogglePrefix,
                 AdminCallbacks.TemplateDeletePrefix,
                 AdminCallbacks.TemplateDeleteConfirmPrefix,
+                AdminCallbacks.TemplateDeleteWithExceptionsPrefix,
             ].some((prefix) => callback.startsWith(prefix))
         );
     }
@@ -54,6 +56,10 @@ export class AdminTemplateHandler {
 
             return;
         }
+
+        if (
+            callback.startsWith(AdminCallbacks.TemplateDeleteWithExceptionsPrefix)
+        ) { await this.deleteTemplate(ctx, callback.replace(AdminCallbacks.TemplateDeleteWithExceptionsPrefix, ''), true); return; }
 
         if (
             callback.startsWith(
@@ -149,15 +155,9 @@ export class AdminTemplateHandler {
         await this.services.adminUi.show(
             ctx,
             [
-                '📅 Розклад тренувань',
+                '📅 Розклад',
                 '',
-                templates.length > 0
-                    ? `Налаштовано шаблонів: ${templates.length}`
-                    : 'Шаблонів поки немає',
-                '',
-                templates.length > 0
-                    ? 'Оберіть шаблон, щоб переглянути або змінити його'
-                    : 'Створіть перший шаблон тренування',
+                templates.length > 0 ? templates.flatMap((template) => template.slots.map((slot) => `${formatDay(slot.dayOfWeek).slice(0, 2)} · ${slot.startTime}–${slot.endTime} · ${template.title}${template.enabled && slot.enabled ? '' : ' · пауза'}`)).map((line, index) => `${index + 1}. ${line}`).join('\n') : 'Записів поки немає.',
             ].join('\n'),
             createScheduleKeyboard(
                 templates,
@@ -173,11 +173,13 @@ export class AdminTemplateHandler {
             await this.services.templates.getRequired(
                 templateId,
             );
+        const chat = await this.services.chats.getById(template.chatId);
 
         await this.services.adminUi.show(
             ctx,
             renderTemplateCard(
                 template,
+                chat?.name,
             ),
             createTemplateKeyboard(
                 template,
@@ -203,9 +205,9 @@ export class AdminTemplateHandler {
                     templateId,
                 );
 
-        await this.services.adminUi.replaceWithSuccess(
+        await this.services.adminUi.show(
             ctx,
-            `${updated.enabled ? 'Шаблон увімкнено.' : 'Шаблон вимкнено.'}\n\n${renderTemplateCard(updated)}`,
+            renderTemplateCard(updated),
             createTemplateKeyboard(
                 updated,
             ),
@@ -240,21 +242,16 @@ export class AdminTemplateHandler {
                         )}`,
                     ],
                 )
-                : [
-                    '⚠️ У шаблоні немає слотів',
-                ];
+                : ['⚠️ У розкладі немає часу'];
 
         await this.services.adminUi.show(
             ctx,
             [
-                '🗑 Видалити шаблон?',
+                `Видалити «${template.title}» з розкладу?`,
                 '',
-                `🏸 ${template.title}`,
                 ...slotLines,
                 '',
-                'Після видалення автоматична публікація цього тренування припиниться',
-                '',
-                'Цю дію неможливо скасувати',
+                'Уже опубліковані тренування не буде видалено.',
             ]
                 .filter(
                     (line): line is string =>
@@ -270,14 +267,14 @@ export class AdminTemplateHandler {
     private async deleteTemplate(
         ctx: Context,
         templateId: string,
+        deleteFutureExceptions = false,
     ): Promise<void> {
-        await this.templateScheduler.delete(
-            templateId,
-        );
+        try { await this.templateScheduler.delete(templateId, deleteFutureExceptions); }
+        catch (error) { const match = error instanceof Error ? error.message.match(/^SCHEDULE_HAS_EXCEPTIONS:(\d+)$/) : undefined; if (match) { await this.services.adminUi.show(ctx, `⚠️ Для цього розкладу є ${match[1]} майбутні винятки.`, createTemplateDeleteWithExceptionsKeyboard(templateId)); return; } throw error; }
         const settings = await this.services.repositories.settings.get();
         const templates = await this.services.templates.listByClubId(settings.clubId);
         templates.sort((first, second) => this.compareTemplates(first, second));
-        await this.services.adminUi.replaceWithSuccess(ctx, templates.length ? 'Шаблон видалено. Оберіть інший шаблон.' : 'Шаблон видалено. Розклад порожній — створіть новий шаблон.', createScheduleKeyboard(templates));
+        await this.services.adminUi.show(ctx, templates.length ? '📅 Розклад' : '📅 Розклад\n\nЗаписів поки немає.', createScheduleKeyboard(templates));
     }
 
     private compareTemplates(

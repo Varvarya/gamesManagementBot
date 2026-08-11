@@ -72,6 +72,14 @@ export function createChatDeleteKeyboard(
     ]);
 }
 
+export function createReferencedChatKeyboard() {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback('🔄 Замінити чат', AdminCallbacks.Schedule)],
+        [Markup.button.callback('⛔ Прибрати публікацію', AdminCallbacks.Schedule)],
+        [Markup.button.callback('❌ Скасувати', AdminCallbacks.Chats)],
+    ]);
+}
+
 export function createChatPreviewKeyboard() {
     return Markup.inlineKeyboard([
         [Markup.button.callback('✅ Підтвердити', AdminCallbacks.ConfirmAddChat)],

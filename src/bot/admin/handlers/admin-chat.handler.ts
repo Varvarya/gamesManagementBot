@@ -7,6 +7,7 @@ import {
     createChatKeyboard,
     createChatsKeyboard,
     createChatPreviewKeyboard,
+    createReferencedChatKeyboard,
 } from '../keyboards/chat.keyboard';
 import { renderChatCard } from '../ui/admin-formatters';
 import { createFlowCancelKeyboard } from '../keyboards/flow.keyboard';
@@ -73,9 +74,10 @@ export class AdminChatHandler {
                 return;
             }
             try {
-                const chat = await this.services.chats.upsert({ id: data.pendingChatId, name: data.pendingChatName });
+                const chat = await this.services.chats.upsert({ id: data.pendingChatId, name: data.pendingChatName,
+                    available: data.pendingChatAvailable, validationWarning: data.pendingChatValidationWarning, validatedAt: new Date().toISOString() });
                 this.services.adminFlow.finish(adminId);
-                await this.services.adminUi.replaceWithSuccess(ctx, `Чат додано.\n\n${renderChatCard(chat)}`, createChatKeyboard(chat));
+                await this.services.adminUi.show(ctx, `${renderChatCard(chat)}${chat.available === false ? `\n\n⚠️ ${chat.validationWarning ?? 'Бот не може надсилати повідомлення в цей чат.'}` : ''}`, createChatKeyboard(chat));
             } catch (error) {
                 await this.services.adminUi.replaceWithError(ctx, error instanceof Error ? error.message : 'Не вдалося додати чат. Спробуйте ще раз.', createChatPreviewKeyboard());
             }
@@ -100,8 +102,8 @@ export class AdminChatHandler {
             if (references.length) {
                 await this.services.adminUi.replaceWithError(
                     ctx,
-                    `Чат використовується у ${references.length} шаблон(ах). Спочатку виберіть інший чат або видаліть ці шаблони.`,
-                    createChatKeyboard(await this.services.chats.getRequired(chatId)),
+                    `⚠️ Цей чат використовується у ${references.length} записах розкладу.\n\nСпочатку виберіть для них інший чат або призупиніть публікацію.`,
+                    createReferencedChatKeyboard(),
                 );
                 return;
             }
@@ -296,8 +298,22 @@ export class AdminChatHandler {
             return;
         }
 
-        this.services.adminFlow.setData(adminId, { pendingChatName: name.trim(), pendingChatId: id });
-        await this.services.adminUi.show(ctx, ['👀 Перевірте дані', '', `Назва: ${name.trim()}`, `Telegram ID: ${id}`, '', 'Усе правильно?'].join('\n'), createChatPreviewKeyboard());
+        const validation = await this.validateTelegramChat(ctx, id);
+        this.services.adminFlow.setData(adminId, { pendingChatName: name.trim(), pendingChatId: id, pendingChatAvailable: validation.available, pendingChatValidationWarning: validation.warning });
+        await this.services.adminUi.show(ctx, ['👀 Перевірте дані', '', `Назва: ${name.trim()}`, `Telegram ID: ${id}`,
+            validation.available ? '✅ Бот має доступ до чату.' : `⚠️ ${validation.warning}`, '', 'Усе правильно?'].join('\n'), createChatPreviewKeyboard());
+    }
+
+    private async validateTelegramChat(ctx: Context, chatId: number): Promise<{ available: boolean; warning?: string }> {
+        try {
+            await ctx.telegram.getChat(chatId);
+            const member = await ctx.telegram.getChatMember(chatId, ctx.botInfo.id);
+            if (member.status === 'left' || member.status === 'kicked') return { available: false, warning: 'Бот не доданий до цього чату.' };
+            if (member.status === 'restricted' && !member.can_send_messages) return { available: false, warning: 'Бот не може надсилати повідомлення в цей чат.' };
+            return { available: true };
+        } catch {
+            return { available: false, warning: 'Бот не може надсилати повідомлення в цей чат.' };
+        }
     }
 
     private parseManualInput(text: string): { name: string; id: number } | undefined {
@@ -332,13 +348,7 @@ export class AdminChatHandler {
             [
                 '💬 Чати',
                 '',
-                chats.length > 0
-                    ? `Збережено: ${chats.length}`
-                    : 'Чатів поки немає.',
-                '',
-                chats.length > 0
-                    ? 'Оберіть чат, щоб відкрити його.'
-                    : 'Натисніть «Додати чат», щоб підключити першу групу.',
+                chats.length > 0 ? chats.map((chat, index) => `${index + 1}. ${chat.name}`).join('\n') : 'Чатів поки немає.',
             ]
                 .filter(
                     (line): line is string =>

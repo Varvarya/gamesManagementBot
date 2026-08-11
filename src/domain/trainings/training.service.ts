@@ -65,6 +65,8 @@ export class TrainingService {
         training.messageId = input.messageId;
         training.status = 'open';
         training.publishedAt = now;
+        training.scheduledPublicationAt = undefined;
+        training.publicationStale = false;
         training.updatedAt = now;
 
         return this.repositories.trainings.save(training);
@@ -151,6 +153,12 @@ export class TrainingService {
     }
 
     async open(trainingId: string): Promise<Training> {
+        const training = await this.getRequired(trainingId);
+        if (training.status === 'cancelled' || training.status === 'finished' || training.status === 'archived') {
+            throw new Error('TRAINING_CANNOT_REOPEN');
+        }
+        const start = new Date(`${training.date}T${training.startTime}:00`);
+        if (start.getTime() <= Date.now()) throw new Error('TRAINING_ALREADY_STARTED');
         return this.updateStatus(trainingId, 'open');
     }
 
@@ -198,6 +206,8 @@ export class TrainingService {
 
         const training = await this.getRequired(trainingId);
 
+        if (minPlayers > training.placesLimit) throw new Error('MIN_EXCEEDS_LIMIT');
+
         training.minPlayers = minPlayers;
         training.updatedAt = nowIso();
 
@@ -207,6 +217,7 @@ export class TrainingService {
     }
 
     async save(training: Training): Promise<Training> {
+        if (training.minPlayers > training.placesLimit) throw new Error('MIN_EXCEEDS_LIMIT');
         training.updatedAt = nowIso();
         const saved = await this.repositories.trainings.save(training);
         await this.notifyChanged(saved);

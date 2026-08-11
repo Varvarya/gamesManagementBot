@@ -12,6 +12,9 @@ import { SchedulerService } from '../scheduler/scheduler.service';
 import { RepositoriesContext } from './repositories.context';
 import { SettingsService } from '../domain/settings/settings.service';
 import { SessionContextService } from '../bot/session/session-context.service';
+import { ClubReadinessService } from '../domain/clubs/club-readiness.service';
+import { ScheduleExceptionService } from '../domain/schedule-exceptions/schedule-exception.service';
+import { ScheduleOccurrenceResolver } from '../domain/schedule-exceptions/schedule-occurrence.resolver';
 
 export class ServicesContext {
     readonly repositories: RepositoriesContext;
@@ -27,6 +30,9 @@ export class ServicesContext {
     readonly chats: ChatService;
     readonly adminFlow: AdminFlowService;
     readonly settings: SettingsService;
+    readonly readiness: ClubReadinessService;
+    readonly scheduleExceptions: ScheduleExceptionService;
+    readonly occurrenceResolver: ScheduleOccurrenceResolver;
 
     readonly adminUi: AdminUi;
     readonly sessionContexts?: SessionContextService;
@@ -74,11 +80,15 @@ export class ServicesContext {
         this.chats =
             new ChatService(
                 repositories.chats,
+                async (chatId) => (await repositories.templates.list()).filter((template) => template.chatId === chatId).length,
             );
 
         this.adminFlow =
             new AdminFlowService();
         this.settings = new SettingsService(repositories);
+        this.readiness = new ClubReadinessService(repositories);
+        this.scheduleExceptions = new ScheduleExceptionService(repositories.scheduleExceptions, repositories.clubId);
+        this.occurrenceResolver = new ScheduleOccurrenceResolver();
 
         this.trainingMessageRenderer =
             new TrainingMessageRenderer();

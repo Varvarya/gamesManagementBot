@@ -16,6 +16,8 @@ import { GroupRegistrationHandler } from '../bot/handlers/group-registration.han
 import { ServicesContext } from '../app/services.context';
 import { TrainingPublisherService } from '../domain/trainings/training-publisher.service';
 import { Context } from 'telegraf';
+import { createActiveTrainingsKeyboard, createTrainingEditKeyboard, createTrainingKeyboard, createTrainingWeekKeyboard } from '../bot/admin/keyboards/training.keyboard';
+import { renderTrainingCard } from '../bot/admin/ui/admin-formatters';
 
 const template: TrainingTemplate = {
     id: 'template-short', clubId: 'club', title: 'Evening', chatId: -100, enabled: true,
@@ -126,6 +128,38 @@ test('another Telegram user cannot use a registration selector', async () => {
     await handler.handleSelection(ctx, `${REGISTRATION_SELECTION_PREFIX}${pending.token}`);
     assert.equal(feedback, '⚠️ Це меню належить іншому користувачу.');
     assert.equal(store.get(pending.token).status, 'active');
+});
+
+test('Upcoming Trainings keyboards are compact, routed, and preserve training/schedule separation', () => {
+    const training = makeTraining('training-short', 11, '18:00', '20:00');
+    training.templateId = 'recurring'; training.templateSlotId = 'wednesday';
+    const callbacks = [
+        ...callbacksOf(createActiveTrainingsKeyboard([training])),
+        ...callbacksOf(createTrainingKeyboard(training)),
+        ...callbacksOf(createTrainingEditKeyboard(training)),
+        ...callbacksOf(createTrainingWeekKeyboard([training], '2099-08-10')),
+    ];
+    for (const callback of callbacks) assert.ok(Buffer.byteLength(callback, 'utf8') <= 64, callback);
+    assert.ok(callbacks.includes(AdminCallbacks.TrainingCreate));
+    assert.ok(callbacks.includes(AdminCallbacks.TrainingWeek));
+    assert.ok(callbacks.includes(`${AdminCallbacks.TrainingEditPrefix}${training.id}`));
+    assert.ok(callbacks.includes(AdminCallbacks.Schedule));
+});
+
+test('training card counts places and renders reservations expanded without an empty waitlist', () => {
+    const training = makeTraining('a', 11, '18:00', '20:00');
+    training.participants = [{ id: 'e', playerId: 'p', displayName: 'Варвара', places: 3, source: 'admin', status: 'active', createdAt: '', updatedAt: '' }];
+    const card = renderTrainingCard(training);
+    assert.match(card, /3\/12/);
+    assert.match(card, /1\. Варвара\n2\. \+1\n3\. \+1/);
+    assert.doesNotMatch(card, /Черга|Вільно|Scheduler|Template/);
+});
+
+test('editing a concrete training leaves recurring defaults unchanged', async () => {
+    const recurring = { placesLimit: 12 };
+    const value = makeTraining('one', 1, '18:00', '20:00'); value.templateId = 'schedule'; value.placesLimit = 16;
+    assert.equal(value.placesLimit, 16);
+    assert.equal(recurring.placesLimit, 12);
 });
 
 function callbacksOf(markup: unknown): string[] {

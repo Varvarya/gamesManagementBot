@@ -19,6 +19,8 @@ import { SessionMode } from '../session/session-context.service';
 import { AdminNavigationService } from '../navigation/admin-navigation.service';
 import { AdminCallbacks } from './callbacks/admin-callbacks';
 import { PlayerDataHandler } from './handlers/player-data.handler';
+import { ClubSetupHandler } from './handlers/club-setup.handler';
+import { ScheduleExceptionHandler } from './handlers/schedule-exception.handler';
 
 export type CallbackHandler = {
     canHandle(callback: string): boolean;
@@ -66,6 +68,8 @@ export class AdminCallbackRouter {
         chatHandler: AdminChatHandler,
         settingsHandler: AdminSettingsHandler,
         playerDataHandler: PlayerDataHandler,
+        setupHandler: ClubSetupHandler,
+        exceptionHandler: ScheduleExceptionHandler,
     ) {
         this.handlers = [
             // Flow handlers
@@ -81,6 +85,8 @@ export class AdminCallbackRouter {
             chatHandler,
             settingsHandler,
             playerDataHandler,
+            setupHandler,
+            exceptionHandler,
         ];
     }
 
@@ -160,7 +166,7 @@ export class AdminCallbackRouter {
 }
 
 function isNavigableScreen(callback: string): boolean {
-    return ['s', 'tr:a', 'tr:r', 'p', 'p:u', 'p:a', 'p:k', 'p:i', 'c', 'cfg', 'cfg:a', 'cfg:st'].includes(callback)
+    return ['s', 'tr:a', 'tr:r', 'p', 'p:u', 'p:a', 'p:k', 'p:i', 'c', 'cfg', 'cfg:a', 'cfg:st', 'setup', 'cfg:ready', 'ex', 'ex:hist', 'ex:next'].includes(callback)
         || /^(?:tr:v:|tr:ra:|p:v:|c:v:|t:v:)/.test(callback);
 }
 

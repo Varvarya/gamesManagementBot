@@ -24,13 +24,24 @@ export const ADMIN_FLOW_STATES = [
     'waiting_training_new_player_places',
     'waiting_training_new_player_confirmation',
     'waiting_training_archive_search',
+    'waiting_training_search',
+    'waiting_training_edit_value',
+    'waiting_training_create',
     'waiting_setting_value',
     'waiting_admin_id',
+    'waiting_admin_add_confirmation',
+    'waiting_admin_remove_selection',
+    'waiting_admin_remove_confirmation',
+    'waiting_owner_transfer_selection',
+    'waiting_owner_transfer_confirmation',
     'waiting_config_import',
     'waiting_player_import_file',
     'player_import_preview',
     'player_import_conflicts',
     'player_import_ready',
+    'waiting_exception_date',
+    'waiting_exception_value',
+    'waiting_exception_extra',
 ] as const;
 
 export type AdminFlowState = typeof ADMIN_FLOW_STATES[number];
@@ -71,11 +82,26 @@ export type AdminFlowData = {
     newTrainingPlayerPlaces?: number;
     pendingChatName?: string;
     pendingChatId?: number;
+    pendingChatAvailable?: boolean;
+    pendingChatValidationWarning?: string;
     settingField?: string;
+    pendingAdminTelegramId?: number;
+    adminCandidateIds?: number[];
+    currentOwnerTelegramUserId?: number;
     templateChatId?: number;
 
     pendingTemplate?: PendingTemplate;
     pendingImport?: unknown;
+    exceptionDate?: string;
+    exceptionEntryId?: string;
+    exceptionId?: string;
+    exceptionAction?: 'cancel' | 'time' | 'places' | 'minimum' | 'chat' | 'publication' | 'publication_now' | 'publication_manual' | 'multiple' | 'extra';
+    pendingException?: unknown;
+    trainingEditField?: 'time' | 'limit' | 'minimum' | 'chat' | 'location' | 'title';
+    pendingTrainingChanges?: Record<string, unknown>;
+    pendingOneOffTraining?: Record<string, unknown>;
+    pendingTrainingPublicationAt?: string;
+    trainingWeekStart?: string;
 };
 
 export type AdminSession = {

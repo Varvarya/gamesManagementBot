@@ -7,29 +7,19 @@ import { AdminSettingsHandler } from '../handlers/admin-settings.handler';
 import { AdminFlowState } from './admin-flow.types';
 
 export class SettingsFlowHandler {
-    readonly textStates: readonly AdminFlowState[] = ['waiting_setting_value', 'waiting_admin_id'];
+    readonly textStates: readonly AdminFlowState[] = ['waiting_setting_value', 'waiting_admin_id', 'waiting_admin_remove_selection', 'waiting_owner_transfer_selection'];
     readonly messageStates: readonly AdminFlowState[] = ['waiting_admin_id'];
     constructor(private readonly services: ServicesContext, private readonly settingsHandler: AdminSettingsHandler) {}
-
-    canHandleText(adminId: number): boolean {
-        return ['waiting_setting_value', 'waiting_admin_id'].includes(this.services.adminFlow.getState(adminId));
-    }
-
-    canHandleMessage(adminId: number): boolean {
-        return this.services.adminFlow.getState(adminId) === 'waiting_admin_id';
-    }
+    canHandleText(adminId: number): boolean { return this.textStates.includes(this.services.adminFlow.getState(adminId)); }
+    canHandleMessage(adminId: number): boolean { return this.services.adminFlow.getState(adminId) === 'waiting_admin_id'; }
 
     async handleMessage(ctx: Context): Promise<boolean> {
         const adminId = ctx.from?.id;
         if (!adminId || !this.canHandleMessage(adminId) || !ctx.message) return false;
-        const message = ctx.message as typeof ctx.message & { contact?: { user_id?: number }; forward_origin?: { type?: string; sender_user?: { id: number } } };
-        const forwardedId = message.contact?.user_id ?? message.forward_origin?.sender_user?.id;
-        if (!forwardedId) {
-            if ('text' in message) return false;
-            await this.services.adminUi.replaceWithError(ctx, 'Telegram не надав user id. Попросіть користувача дозволити пересилання або введіть його числовий ID.', createFlowCancelKeyboard(AdminCallbacks.SettingsAdmins));
-            return true;
-        }
-        await this.addAdmin(ctx, adminId, forwardedId);
+        const message = ctx.message as typeof ctx.message & { contact?: { user_id?: number }; forward_origin?: { sender_user?: { id: number } } };
+        const id = message.contact?.user_id ?? message.forward_origin?.sender_user?.id;
+        if (!id) return 'text' in message ? false : this.fail(ctx, 'Telegram не надав ID. Введіть числовий Telegram ID.');
+        await this.preview(ctx, adminId, String(id));
         return true;
     }
 
@@ -37,28 +27,26 @@ export class SettingsFlowHandler {
         const adminId = ctx.from?.id;
         if (!adminId) return;
         const state = this.services.adminFlow.getState(adminId);
-        if (state === 'waiting_admin_id') {
-            await this.addAdmin(ctx, adminId, Number(text));
-            return;
-        }
-        const field = this.services.adminFlow.getData(adminId).settingField as EditableSetting | undefined;
-        if (!field) return;
         try {
+            if (state === 'waiting_admin_id') { await this.preview(ctx, adminId, text); return; }
+            if (state === 'waiting_admin_remove_selection' || state === 'waiting_owner_transfer_selection') {
+                await this.settingsHandler.previewSelection(ctx, adminId, Number(text.trim()), state === 'waiting_owner_transfer_selection');
+                return;
+            }
+            const field = this.services.adminFlow.getData(adminId).settingField as EditableSetting | undefined;
+            if (!field) return;
             await this.settingsHandler.update(field, text);
             this.services.adminFlow.reset(adminId);
-            await this.settingsHandler.show(ctx, 'Налаштування збережено.');
-        } catch (error) {
-            await this.services.adminUi.replaceWithError(ctx, error instanceof Error ? error.message : 'Некоректне значення', createFlowCancelKeyboard(AdminCallbacks.Settings));
-        }
+            await this.settingsHandler.show(ctx);
+        } catch (error) { await this.fail(ctx, error instanceof Error ? error.message : 'Некоректне значення.'); }
     }
 
-    private async addAdmin(ctx: Context, adminId: number, telegramUserId: number): Promise<void> {
-        try {
-            await this.services.settings.addAdmin(telegramUserId);
-            this.services.adminFlow.reset(adminId);
-            await this.settingsHandler.showAdmins(ctx, 'Адміністратора додано.');
-        } catch (error) {
-            await this.services.adminUi.replaceWithError(ctx, error instanceof Error ? error.message : 'Не вдалося додати адміністратора', createFlowCancelKeyboard(AdminCallbacks.SettingsAdmins));
-        }
+    private async preview(ctx: Context, adminId: number, query: string): Promise<void> {
+        const telegramUserId = await this.settingsHandler.resolveAdminIdentity(query);
+        await this.settingsHandler.previewAdmin(ctx, adminId, telegramUserId);
+    }
+    private async fail(ctx: Context, message: string): Promise<true> {
+        await this.services.adminUi.replaceWithError(ctx, message, createFlowCancelKeyboard(AdminCallbacks.SettingsAdmins));
+        return true;
     }
 }

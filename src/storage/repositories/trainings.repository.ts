@@ -79,4 +79,8 @@ export class TrainingsRepository extends BaseJsonRepository<Training> {
                 'cancelled',
         );
     }
+
+    async findAnyByTemplateSlotAndDate(templateSlotId: string, date: string): Promise<Training | undefined> {
+        return (await this.list()).find((training) => training.templateSlotId === templateSlotId && training.date === date);
+    }
 }

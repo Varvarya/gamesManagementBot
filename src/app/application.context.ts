@@ -8,6 +8,9 @@ import { TemplateFlowHandler } from '../bot/admin/flows/template-flow.handler';
 import { TrainingFlowHandler } from '../bot/admin/flows/training-flow.handler';
 
 import { AdminMenuHandler } from '../bot/admin/handlers/admin-menu.handler';
+import { ClubSetupHandler } from '../bot/admin/handlers/club-setup.handler';
+import { ScheduleExceptionReconciliationService } from '../domain/schedule-exceptions/schedule-exception-reconciliation.service';
+import { ScheduleExceptionHandler } from '../bot/admin/handlers/schedule-exception.handler';
 import { AdminPlayerHandler } from '../bot/admin/handlers/admin-player.handler';
 import { AdminSettingsHandler } from '../bot/admin/handlers/admin-settings.handler';
 import { AdminTemplateHandler } from '../bot/admin/handlers/admin-template.handler';
@@ -318,7 +321,8 @@ export class ApplicationContext {
         const { repositories, services } = context;
         const publisher = new TrainingPublisherService(this.bot.telegram, repositories, services.trainings, services.trainingMessageRenderer);
         const cancellationScheduler = new TrainingCancellationScheduler(repositories, services.trainings, publisher);
-        const templateScheduler = new TemplateSchedulerService(services.templates, services.scheduler, publisher, services.chats, repositories.settings);
+        const templateScheduler = new TemplateSchedulerService(services.templates, services.scheduler, publisher, services.chats, repositories.settings, undefined, services.scheduleExceptions, services.occurrenceResolver);
+        const exceptionReconciliation = new ScheduleExceptionReconciliationService(repositories, services.trainings, services.occurrenceResolver);
         const storage = new JsonStorage({ dataDir: this.dataDir, storageSlug: context.storageSlug });
         const backups = new BackupService(storage, 5);
         const navigation = new AdminNavigationService(this.sessionContexts, services.adminUi, services.adminFlow);
@@ -332,24 +336,43 @@ export class ApplicationContext {
             await this.clubs.recordSuccessfulPublication(context.clubId);
             await cancellationScheduler.schedule(training);
         });
+        void Promise.all([repositories.trainings.list(), repositories.settings.get()]).then(([trainings, settings]) => {
+            for (const training of trainings.filter((item) => item.status === 'draft' && item.scheduledPublicationAt)) {
+                const at = training.scheduledPublicationAt!;
+                services.scheduler.rescheduleOneOff({ id: `club:${training.clubId}:training:${training.id}`, date: at.slice(0, 10), time: at.slice(11, 16), timezone: settings.timezone }, async () => { await publisher.publishExistingDraft(training.id); });
+            }
+        }).catch((error) => logger.error('training.one_off_restore_failed', { clubId: context.clubId, error }));
         services.chats.setOnChanged(async () => { await this.clubs.touchActivity(context.clubId); });
         services.templates.setOnChanged(async () => { await this.clubs.touchActivity(context.clubId); });
+        services.scheduleExceptions.setOnChanged(async (exception) => {
+            if (exception) {
+                const result = await exceptionReconciliation.apply(exception);
+                if (result.trainingId) {
+                    if (result.action === 'cancelled') cancellationScheduler.cancel(result.trainingId);
+                    else await cancellationScheduler.schedule(await services.trainings.getRequired(result.trainingId), { reconcileOverdue: false });
+                }
+            }
+            await templateScheduler.syncExceptionJobs();
+            await this.clubs.touchActivity(context.clubId);
+        });
 
         const templateFlow = new TemplateFlowHandler(services, templateScheduler);
         const playerFlow = new PlayerFlowHandler(services, publisher);
         const trainingFlow = new TrainingFlowHandler(services, publisher);
         const menu = new AdminMenuHandler(services, this.superAdminIds, this.sessionContexts);
-        const training = new AdminTrainingHandler(services, publisher);
+        const training = new AdminTrainingHandler(services, publisher, cancellationScheduler);
         const player = new AdminPlayerHandler(services);
         const playerData = new PlayerDataHandler(services, backups);
+        const setup = new ClubSetupHandler(services);
+        const exceptions = new ScheduleExceptionHandler(services, exceptionReconciliation, templateScheduler, cancellationScheduler);
         const template = new AdminTemplateHandler(services, templateScheduler);
-        const settings = new AdminSettingsHandler(services, cancellationScheduler, backups, templateScheduler);
+        const settings = new AdminSettingsHandler(services, cancellationScheduler, backups, templateScheduler, this.superAdminIds);
         const chat = new AdminChatHandler(services);
         const settingsFlow = new SettingsFlowHandler(services, settings);
         const configService = new SuperAdminConfigService(repositories, templateScheduler, backups);
         const superAdminConfig = new SuperAdminConfigHandler(services, configService, [...this.superAdminIds]);
-        const callbackRouter = new AdminCallbackRouter(services, this.callbackAuthorization, context.clubId, this.sessionContexts, navigation, templateFlow, playerFlow, trainingFlow, menu, training, player, template, chat, settings, playerData);
-        const textRouter = new AdminTextRouter(services, [chat, settingsFlow, superAdminConfig, playerData], [templateFlow, playerFlow, trainingFlow, settingsFlow], this.superAdminIds, this.callbackAuthorization, context.clubId, this.sessionContexts);
+        const callbackRouter = new AdminCallbackRouter(services, this.callbackAuthorization, context.clubId, this.sessionContexts, navigation, templateFlow, playerFlow, trainingFlow, menu, training, player, template, chat, settings, playerData, setup, exceptions);
+        const textRouter = new AdminTextRouter(services, [chat, settingsFlow, superAdminConfig, playerData], [templateFlow, playerFlow, trainingFlow, settingsFlow, exceptions], this.superAdminIds, this.callbackAuthorization, context.clubId, this.sessionContexts);
         const groupRegistration = new GroupRegistrationHandler(services, publisher, this.registrationSelections);
         return { context, publisher, templateScheduler, cancellationScheduler, menu, callbackRouter, textRouter, groupRegistration, superAdminConfig };
     }

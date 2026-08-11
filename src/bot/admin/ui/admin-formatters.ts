@@ -140,39 +140,24 @@ export function renderTrainingCard(
 ): string {
     const status = getTrainingStatus(training);
     const registered = countTrainingPlaces(training);
-    const waiting = countWaitlistPlaces(training);
-    const free = Math.max(
-        training.placesLimit - registered,
-        0,
-    );
     const participantLimit = options.showAll ? training.participants.length : 10;
     const waitlistLimit = options.showAll ? training.waitlist.length : 5;
     const participantLines = renderParticipantNames(training.participants, options.playerNames, participantLimit);
     const waitlistLines = renderParticipantNames(training.waitlist, options.playerNames, waitlistLimit);
 
     return [
-        `${status.icon} ${training.title}`,
-        '',
-        `📅 ${formatDate(training.date)}`,
-        `🕐 ${formatTimeRange(
-            training.startTime,
-            training.endTime,
-        )}`,
+        `🏸 ${training.title}`,
+        `${formatDate(training.date)} · ${formatTimeRange(training.startTime, training.endTime)}`,
         training.location
             ? `📍 ${training.location}`
             : undefined,
-        `💬 ${options.chatName ?? training.chatId}`,
         '',
-        `👥 Учасники (${registered}/${training.placesLimit})`,
+        `${status.icon} ${status.title}`,
+        training.status === 'cancelled' ? `${registered} місць було записано` : `${registered}/${training.placesLimit}`,
+        '',
         ...participantLines,
-        '',
-        `🟡 Черга (${waiting})`,
-        ...waitlistLines,
-        '',
-        `🪑 Вільно: ${free}`,
-        `🔻 Мінімум: ${training.minPlayers}`,
-        '',
-        `Статус: ${status.icon} ${status.title}`,
+        ...(training.waitlist.length ? ['', '⏳ Очікують', ...waitlistLines] : []),
+        ...(training.publicationStale ? ['', '⚠️ Повідомлення в чаті недоступне'] : []),
     ]
         .filter(
             (line): line is string =>
@@ -186,69 +171,41 @@ export function isTrainingParticipantListTruncated(training: Training): boolean 
 }
 
 function renderParticipantNames(entries: Training['participants'], names: ReadonlyMap<string, string> | undefined, limit: number): string[] {
-    if (entries.length === 0) return ['—'];
-    const visible = entries.slice(0, limit).map((entry, index) => {
-        const places = entry.places > 1 ? ` (${entry.places} місця)` : '';
-        return `${index + 1}. ${names?.get(entry.playerId) ?? entry.displayName ?? 'Гравець'}${places}`;
-    });
-    const hidden = entries.length - visible.length;
+    if (entries.length === 0) return [];
+    const visible: string[] = [];
+    let number = 1;
+    for (const entry of entries) {
+        if (visible.length >= limit) break;
+        visible.push(`${number++}. ${names?.get(entry.playerId) ?? entry.displayName ?? 'Гравець'}`);
+        for (let place = 1; place < entry.places && visible.length < limit; place++) visible.push(`${number++}. +1`);
+    }
+    const hidden = entries.reduce((sum, entry) => sum + entry.places, 0) - visible.length;
     if (hidden > 0) visible.push(`… ще ${hidden}`);
     return visible;
 }
 
 export function renderTemplateCard(
     template: TrainingTemplate,
+    chatName?: string,
 ): string {
-    const slotLines = template.slots.flatMap(
-        (slot, index) => {
-            const placesLimit =
-                slot.placesLimit ??
-                template.placesLimit;
-
-            const minPlayers =
-                slot.minPlayers ??
-                template.minPlayers;
-
-            const publishDaysBefore =
-                slot.publishDaysBefore ??
-                template.publishDaysBefore;
-
-            const publishTime =
-                slot.publishTime ??
-                template.publishTime;
-
-            return [
-                index > 0
-                    ? ''
-                    : undefined,
-                `${
-                    slot.enabled
-                        ? '🟢'
-                        : '⚪️'
-                } ${formatDay(slot.dayOfWeek)}`,
-                `🕐 ${formatTimeRange(
-                    slot.startTime,
-                    slot.endTime,
-                )}`,
-                `👥 Місць: ${placesLimit}`,
-                `🔻 Мінімум: ${minPlayers}`,
-                `📣 За ${publishDaysBefore} дн. о ${publishTime}`,
-            ];
-        },
-    );
+    const days = template.slots.map((slot) => formatShortDay(slot.dayOfWeek)).join(', ');
+    const ranges = [...new Set(template.slots.map((slot) => formatTimeRange(slot.startTime, slot.endTime)))];
+    const publication = template.publishDaysBefore === 1 ? `напередодні о ${template.publishTime}` : `за ${template.publishDaysBefore} дн. о ${template.publishTime}`;
 
     return [
-        `${
-            template.enabled
-                ? '🟢'
-                : '⚪️'
-        } ${template.title}`,
+        `🏸 ${template.title}`,
         template.location
             ? `📍 ${template.location}`
             : undefined,
         '',
-        '🏸 Слоти тренувань',
-        ...slotLines,
+        days,
+        ...ranges,
+        '',
+        `${template.placesLimit} місць · мінімум ${template.minPlayers}`,
+        `Публікація: ${publication}`,
+        `Чат: ${chatName ?? template.chatId}`,
+        '',
+        template.enabled ? '🟢 Активне' : '⏸ На паузі',
     ]
         .filter(
             (line): line is string =>

@@ -66,6 +66,23 @@ export class TrainingPublisherService {
         return this.publishDraft(training);
     }
 
+    async publishExistingDraft(trainingId: string): Promise<Training> {
+        const training = await this.trainings.getRequired(trainingId);
+        if (training.status !== 'draft') throw new Error('Training is not a draft');
+        return this.publishDraft(training);
+    }
+
+    async republish(trainingId: string): Promise<Training> {
+        const training = await this.trainings.getRequired(trainingId);
+        if (training.status === 'draft') return this.publishExistingDraft(trainingId);
+        if (!training.publicationStale && training.messageId) throw new Error('Publication is still active');
+        training.messageId = undefined;
+        training.status = 'draft';
+        training.publicationStale = false;
+        await this.repositories.trainings.save(training);
+        return this.publishExistingDraft(training.id);
+    }
+
     async refreshMessage(trainingId: string): Promise<boolean> {
         const current = this.refreshes.get(trainingId);
         if (current) {
@@ -122,6 +139,9 @@ export class TrainingPublisherService {
                 return false;
             }
             if (isTelegramMessageUnavailable(error)) {
+                training.publicationStale = true;
+                training.updatedAt = new Date().toISOString();
+                await this.repositories.trainings.save(training);
                 logger.warn('publication.message_unavailable', { trainingId: training.id, chatId: training.chatId, messageId: training.messageId });
                 return false;
             }

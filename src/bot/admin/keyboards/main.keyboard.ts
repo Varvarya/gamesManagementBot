@@ -6,34 +6,23 @@ export function createAdminMainKeyboard(
     unconfirmedPlayersCount: number,
     setup?: { hasChats: boolean; hasTemplates: boolean },
     isSuperAdmin = false,
+    setupRequired = false,
 ) {
     return Markup.inlineKeyboard([
-        ...(!setup?.hasChats ? [[Markup.button.callback('1️⃣ Додати перший чат', AdminCallbacks.AddChat)]] : []),
-        ...(setup?.hasChats && !setup.hasTemplates ? [[Markup.button.callback('2️⃣ Створити розклад', AdminCallbacks.CreateTemplate)]] : []),
-        [
-            Markup.button.callback('📝 Шаблони', AdminCallbacks.Schedule),
-        ],
+        ...(setupRequired ? [[Markup.button.callback('▶️ Завершити налаштування', AdminCallbacks.Setup)]] : []),
         [
             Markup.button.callback(
                 '📅 Розклад',
                 AdminCallbacks.Schedule,
             ),
             Markup.button.callback(
-                `🏸 Тренування${
-                    activeTrainingsCount > 0
-                        ? ` · ${activeTrainingsCount}`
-                        : ''
-                }`,
+                '🏸 Тренування',
                 AdminCallbacks.ActiveTrainings,
             ),
         ],
         [
             Markup.button.callback(
-                `👥 Гравці${
-                    unconfirmedPlayersCount > 0
-                        ? ` · ⚠️ ${unconfirmedPlayersCount}`
-                        : ''
-                }`,
+                '👥 Гравці',
                 AdminCallbacks.Players,
             ),
             Markup.button.callback(

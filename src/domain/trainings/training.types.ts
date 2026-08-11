@@ -64,5 +64,7 @@ export type Training = {
 
     createdAt: string;
     publishedAt?: string;
+    scheduledPublicationAt?: string;
+    publicationStale?: boolean;
     updatedAt: string;
 };

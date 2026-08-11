@@ -9,6 +9,7 @@ import { logger } from '../utils/logger';
 import { ClubSettings } from '../domain/settings/settings.types';
 import { Player } from '../domain/players/player.types';
 import { Training } from '../domain/trainings/training.types';
+import { ScheduleExceptionsRepository } from '../storage/repositories/schedule-exceptions.repository';
 
 type LegacyTemplateDefaults = {
     defaultPlacesLimit?: number;
@@ -26,6 +27,7 @@ export class RepositoriesContext {
     readonly templates: TemplatesRepository;
     readonly logs: LogsRepository;
     readonly settings: SettingsRepository;
+    readonly scheduleExceptions: ScheduleExceptionsRepository;
     private readonly storagePath: string;
     private readonly diagnosticIdentity: { clubId: string; title: string; storageSlug: string };
 
@@ -88,6 +90,7 @@ export class RepositoriesContext {
                     updatedAt: new Date().toISOString(),
                 },
             );
+        this.scheduleExceptions = new ScheduleExceptionsRepository(storage.getFilePath('schedule-exceptions'));
     }
 
     async loadAll(): Promise<void> {
@@ -99,6 +102,7 @@ export class RepositoriesContext {
             this.templates.load(),
             this.logs.load(),
             this.settings.load(),
+            this.scheduleExceptions.load(),
         ]);
         await this.migratePlayers();
         const settings = await this.settings.get();

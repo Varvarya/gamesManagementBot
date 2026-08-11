@@ -47,4 +47,5 @@ export type ClubHealth = {
     dataAvailable?: boolean;
     playerCount?: number;
     trainingCount?: number;
+    readinessReady?: boolean;
 };

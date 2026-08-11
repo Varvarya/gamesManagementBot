@@ -4,6 +4,7 @@ import { Club, ClubHealth } from './club.types';
 import { ClubRepository } from '../../storage/repositories/club.repository';
 import { ClubContextManager } from '../../app/club-context-manager';
 import { logger } from '../../utils/logger';
+import { ClubReadinessService } from './club-readiness.service';
 
 export class ClubHealthService {
     constructor(private readonly clubs: ClubRepository, private readonly dataDir: string, private readonly inactiveDays = 30, private readonly contexts?: ClubContextManager) {}
@@ -61,9 +62,11 @@ export class ClubHealthService {
             const context = await this.contexts!.getClubContext(club.id);
             const settings = await context.repositories.settings.get();
             if (settings.clubId !== club.id || settings.storageSlug !== club.slug) throw new Error('Registry та settings не узгоджені');
+            const effectiveClub: Club = { ...club, name: settings.title, admins: settings.admins };
             const [chats, templates, players, trainings] = await Promise.all([
                 context.repositories.chats.getAll(), context.repositories.templates.list(), context.repositories.players.list(), context.repositories.trainings.list(),
             ]);
+            const readiness = await new ClubReadinessService(context.repositories).calculate();
             const enabledTemplates = templates.filter((item) => item.enabled).length;
             const expectedSchedulerJobs = templates.reduce((count, item) => count + (item.enabled ? item.slots.filter((slot) => slot.enabled).length : 0), 0);
             const activeTrainings = trainings.filter((item) => ['open', 'closed', 'cancelled'].includes(item.status)).length;
@@ -72,11 +75,11 @@ export class ClubHealthService {
             let status: Club['status'];
             if (club.disabledAt || club.status === 'disabled') status = 'disabled';
             else if (duplicateSlug) status = 'broken';
-            else if (!chats.length || !enabledTemplates || !club.admins.length) status = 'setup_required';
+            else if (!chats.length || !enabledTemplates || !settings.admins.length) status = 'setup_required';
             else if (!club.lastActivityAt || Date.now() - Date.parse(club.lastActivityAt) > this.inactiveDays * 86_400_000) status = 'inactive';
             else status = 'active';
             loggerStats(club.id, context.repositories.clubId, chats.length, templates.length);
-            return { club, status, problems, chats: chats.length, enabledTemplates, templateCount: templates.length, playerCount: players.length, trainingCount: trainings.length, activeTrainings, expectedSchedulerJobs, restoredSchedulerJobs: restored, schedulerStatus, dataAvailable: true };
+            return { club: effectiveClub, status, problems, chats: chats.length, enabledTemplates, templateCount: templates.length, playerCount: players.length, trainingCount: trainings.length, activeTrainings, expectedSchedulerJobs, restoredSchedulerJobs: restored, schedulerStatus, dataAvailable: true, readinessReady: readiness.ready };
         } catch (error) {
             problems.push(error instanceof Error ? error.message : 'Помилка завантаження');
             return { club, status: club.status === 'disabled' ? 'disabled' : 'broken', problems, chats: 0, enabledTemplates: 0, templateCount: 0, activeTrainings: 0, expectedSchedulerJobs: 0, restoredSchedulerJobs: 0, schedulerStatus: 'failed', dataAvailable: false };

@@ -9,21 +9,18 @@ export function createPlayersKeyboard(
     return Markup.inlineKeyboard([
         [
             Markup.button.callback(
-                '🔎 Знайти гравця',
+                '🔎 Пошук',
                 AdminCallbacks.SearchPlayers,
             ),
         ],
         [
             Markup.button.callback(
-                '➕ Додати гравця',
+                '➕ Додати',
                 AdminCallbacks.CreatePlayer,
             ),
         ],
-        [Markup.button.callback('🆕 Очікують підтвердження', AdminCallbacks.UnconfirmedPlayers)],
-        [Markup.button.callback('👥 Переглянути гравців', AdminCallbacks.AllPlayers)],
-        [Markup.button.callback('🔴 Неактивні гравці', AdminCallbacks.InactivePlayers)],
+        [Markup.button.callback('🆕 Нові', AdminCallbacks.UnconfirmedPlayers)],
         [Markup.button.callback('📥 Імпорт', AdminCallbacks.PlayerImport), Markup.button.callback('📤 Експорт', AdminCallbacks.PlayerExport)],
-        [Markup.button.callback('🧹 Дублікати', AdminCallbacks.PlayerDuplicates)],
         [
             Markup.button.callback(
                 '◀️ Назад',

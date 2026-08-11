@@ -13,6 +13,7 @@ export class ChatService {
     private onChanged?: () => Promise<void>;
     constructor(
         private readonly repository: ChatsRepository,
+        private readonly countReferences?: (chatId: number) => Promise<number>,
     ) {}
 
     async getAll(): Promise<ChatConfig[]> {
@@ -126,6 +127,8 @@ export class ChatService {
     async delete(
         id: number,
     ): Promise<void> {
+        const references = await this.countReferences?.(id) ?? 0;
+        if (references > 0) throw new Error(`CHAT_IN_USE:${references}`);
         await this.repository.delete(
             id,
         );

@@ -13,6 +13,7 @@ export type SessionContext = {
     currentUiMessageId?: number;
     trackedUiMessageIds: number[];
     temporaryUserMessageIds: number[];
+    setupIntroSeen?: boolean;
 };
 
 export type NavigationEntry = { screen: string; params?: Record<string, string> };
@@ -55,6 +56,7 @@ export class SessionContextService {
     trackUiMessage(telegramUserId: number, messageId: number, current = false): void { const session = this.sessions.get(telegramUserId); if (!session) return; if (!session.trackedUiMessageIds.includes(messageId)) session.trackedUiMessageIds.push(messageId); if (current) session.currentUiMessageId = messageId; }
     trackTemporaryUserMessage(telegramUserId: number, messageId: number): void { const session = this.sessions.get(telegramUserId); if (session && !session.temporaryUserMessageIds.includes(messageId)) session.temporaryUserMessageIds.push(messageId); }
     clearTrackedMessages(telegramUserId: number): void { const session = this.sessions.get(telegramUserId); if (!session) return; session.trackedUiMessageIds = []; session.temporaryUserMessageIds = []; session.currentUiMessageId = undefined; }
+    markSetupIntroSeen(telegramUserId: number): void { const session = this.sessions.get(telegramUserId); if (session) session.setupIntroSeen = true; }
 
     clear(telegramUserId: number): void { this.sessions.delete(telegramUserId); }
 }

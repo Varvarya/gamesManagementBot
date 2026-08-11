@@ -10,6 +10,7 @@ export type SchedulerTemplate = {
     publishTime: string;
     timezone: string;
 };
+export type SchedulerOneOff = { id: string; date: string; time: string; timezone: string };
 
 type SchedulerPublishHandler =
     () => Promise<void>;
@@ -54,6 +55,18 @@ export class SchedulerService {
             job,
         );
         logger.info('scheduler.job_scheduled', { jobId: template.id, dayOfWeek: template.dayOfWeek, publishTime: template.publishTime, timezone: template.timezone });
+    }
+
+    rescheduleOneOff(input: SchedulerOneOff, onPublish: SchedulerPublishHandler): void {
+        this.cancelTemplate(input.id);
+        const [year, month, day] = input.date.split('-').map(Number);
+        const [hour, minute] = this.parseTime(input.time);
+        const rule = new schedule.RecurrenceRule();
+        rule.year = year; rule.month = month - 1; rule.date = day; rule.hour = hour; rule.minute = minute; rule.second = 0; rule.tz = input.timezone;
+        const job = schedule.scheduleJob(rule, async () => { try { await onPublish(); } catch (error) { logger.error('scheduler.job_failed', { jobId: input.id, error }); } finally { this.jobs.delete(input.id); } });
+        if (!job) return; // Past one-off jobs are reconciled explicitly and never replayed on restore.
+        this.jobs.set(input.id, job);
+        logger.info('scheduler.one_off_scheduled', { jobId: input.id, date: input.date, time: input.time, timezone: input.timezone });
     }
 
     cancelTemplate(

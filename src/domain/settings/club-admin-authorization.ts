@@ -21,3 +21,15 @@ export function isTelegramUserClubAdmin(admins: unknown, telegramUserId: number 
 export function isClubAdmin(club: { admins?: unknown }, telegramUserId: number | string): boolean {
     return isTelegramUserClubAdmin(club.admins, telegramUserId);
 }
+
+export function isClubOwner(admins: unknown, telegramUserId: number | string): boolean {
+    const userId = Number(telegramUserId);
+    if (!Array.isArray(admins) || !Number.isSafeInteger(userId) || userId <= 0) return false;
+    return admins.some((entry: unknown) => Boolean(entry && typeof entry === 'object'
+        && clubAdminTelegramId(entry as StoredClubAdmin) === userId
+        && (entry as { role?: unknown }).role === 'owner'));
+}
+
+export function canManageClubAdmins(admins: unknown, telegramUserId: number | string, isSuperAdmin = false): boolean {
+    return isSuperAdmin || isClubOwner(admins, telegramUserId);
+}
