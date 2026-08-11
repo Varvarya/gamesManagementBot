@@ -16,6 +16,8 @@ export type ParticipantStatus =
 
 export type ParticipantSource =
     | 'telegram'
+    | 'telegram_self'
+    | 'telegram_guest'
     | 'admin';
 
 export type ParticipantEntry = {
@@ -23,6 +25,7 @@ export type ParticipantEntry = {
 
     playerId: string;
     telegramUserId?: number;
+    registeredByTelegramUserId?: number;
     displayName: string;
 
     places: number;

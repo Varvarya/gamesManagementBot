@@ -11,6 +11,10 @@ export class PlayerService {
         private readonly repositories: RepositoriesContext,
     ) {}
 
+    async findByTelegramId(telegramUserId: number): Promise<Player | undefined> {
+        return this.repositories.players.findByTelegramId(telegramUserId);
+    }
+
     async findOrCreateByTelegramUser(user: {
         id: number;
         first_name?: string;
@@ -20,7 +24,7 @@ export class PlayerService {
         let existing = await this.repositories.players.findByTelegramId(user.id);
 
         if (existing) {
-            let changed = existing.telegramUserId === user.id;
+            let changed = false;
 
             if (existing.telegramName !== user.first_name) {
                 existing.telegramName = user.first_name;
@@ -104,8 +108,38 @@ export class PlayerService {
         });
     }
 
+    async resolveByStrongName(name: string): Promise<Player | undefined> {
+        const key = this.normalizeLookup(name);
+        if (!key) return undefined;
+        const matches = (await this.repositories.players.list()).filter((player) => player.isActive && [
+            player.displayName, player.telegramName, player.username, ...player.aliases,
+        ].some((value) => value && this.normalizeLookup(value) === key));
+        if (matches.length > 1) throw new Error('AMBIGUOUS_PLAYER_NAME');
+        return matches[0];
+    }
+
+    async resolveOrCreateTelegramGuest(displayName: string): Promise<Player> {
+        const normalized = this.normalizeName(displayName);
+        if (normalized.length < 2 || normalized.length > 100) throw new Error('INVALID_PLAYER_NAME');
+        const existing = await this.resolveByStrongName(normalized);
+        if (existing) return existing;
+        return this.serialize(async () => {
+            const raced = await this.resolveByStrongName(normalized);
+            if (raced) return raced;
+            const now = nowIso();
+            return this.repositories.players.save({
+                id: createId('player'), displayName: normalized, aliases: [], isConfirmed: false,
+                isActive: true, source: 'telegram_guest', createdAt: now, updatedAt: now,
+            });
+        });
+    }
+
     private normalizeName(value: string): string {
         return value.trim().replace(/\s+/g, ' ');
+    }
+
+    private normalizeLookup(value: string): string {
+        return this.normalizeName(value).replace(/^@/, '').toLocaleLowerCase('uk');
     }
 
     private async serialize<T>(operation: () => Promise<T>): Promise<T> {

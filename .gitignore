@@ -14,7 +14,3 @@ yarn-error.log*
 
 .vscode/*
 *.test.ts
-!src/production-readiness.test.ts
-!src/e2e/production-smoke.test.ts
-!src/e2e/multi-club-context.test.ts
-!src/e2e/zero-club-startup.test.ts

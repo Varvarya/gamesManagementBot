@@ -30,9 +30,12 @@ export class AdminTemplateHandler {
         return (
             callback ===
             AdminCallbacks.Schedule ||
-            callback.startsWith(
+            [
                 AdminCallbacks.TemplatePrefix,
-            )
+                AdminCallbacks.TemplateTogglePrefix,
+                AdminCallbacks.TemplateDeletePrefix,
+                AdminCallbacks.TemplateDeleteConfirmPrefix,
+            ].some((prefix) => callback.startsWith(prefix))
         );
     }
 

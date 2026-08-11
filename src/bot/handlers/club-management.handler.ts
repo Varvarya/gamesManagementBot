@@ -131,7 +131,7 @@ export class ClubManagementHandler {
         const ownedRequestMatch = callback.match(/^cr:(e|c):([A-Za-z0-9_-]+)$/);
         if (ownedRequestMatch) {
             const owned = await this.requests.findByShortId(ownedRequestMatch[2]);
-            if (!owned) { await ctx.reply('Ця кнопка вже неактуальна. Відкрийте список заявок знову.'); return true; }
+            if (!owned) { await ctx.reply('⚠️ Це меню вже неактивне.'); return true; }
             if (!owned || owned.status !== 'pending' || (!this.authorization.isSuperAdmin(ctx.from.id) && Number(owned.requesterTelegramId) !== Number(ctx.from.id))) {
                 await ctx.reply('⛔ У вас немає доступу до цієї заявки.'); return true;
             }
@@ -147,7 +147,7 @@ export class ClubManagementHandler {
         const requestMatch = callback.match(/^cr:(v|a|r):([A-Za-z0-9_-]+)$/);
         if (requestMatch) {
             const request = await this.requests.findByShortId(requestMatch[2]);
-            if (!request) { await ctx.reply('Ця кнопка вже неактуальна. Відкрийте список заявок знову.'); return true; }
+            if (!request) { await ctx.reply('⚠️ Це меню вже неактивне.'); return true; }
             if (requestMatch[1] === 'v') return this.showRequest(ctx, request.id);
             if (requestMatch[1] === 'a') return this.approve(ctx, request.id);
             return this.reject(ctx, request.id);

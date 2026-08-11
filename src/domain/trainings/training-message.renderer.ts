@@ -54,8 +54,8 @@ export class TrainingMessageRenderer {
             '⏳ Лист очікування',
             this.renderEntries(training.waitlist, players),
             '',
-            '➕ +1…+4 або +2 Імʼя',
-            '➖ -1…-4',
+            '➕ +1…+4 або +1 Імʼя',
+            '➖ -1…-4 або -1 Імʼя',
         ]
             .filter(
                 (

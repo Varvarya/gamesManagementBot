@@ -1,17 +1,12 @@
-import { Context } from 'telegraf';
+import { Context, Markup } from 'telegraf';
 
 import { ServicesContext } from '../../app/services.context';
 import { TrainingPublisherService } from '../../domain/trainings/training-publisher.service';
 import { logger } from '../../utils/logger';
-import { isValidReservedPlaces } from '../../domain/trainings/reserved-places';
-
-export type ParsedCommand = {
-    action: '+' | '-';
-    places: number;
-    playerName?: string;
-    date?: string;
-    startTime?: string;
-};
+import { registrationCommandParser, RegistrationCommand, RegistrationCommandParseError } from '../../domain/trainings/registration-command.parser';
+import { PendingRegistrationSelectionStore, REGISTRATION_SELECTION_PREFIX } from '../registration/pending-registration-selection.store';
+import { assertCallbackDataValid } from '../callback-data';
+import { Training } from '../../domain/trainings/training.types';
 
 export class GroupRegistrationHandler {
     private readonly handledUpdates =
@@ -20,6 +15,7 @@ export class GroupRegistrationHandler {
     constructor(
         private readonly services: ServicesContext,
         private readonly publisher: TrainingPublisherService,
+        private readonly selections: PendingRegistrationSelectionStore = new PendingRegistrationSelectionStore(),
     ) {}
 
     async handle(
@@ -37,11 +33,7 @@ export class GroupRegistrationHandler {
             return;
         }
 
-        if (
-            !message.text
-                .trim()
-                .match(/^[+-]/)
-        ) {
+        if (!registrationCommandParser.normalize(message.text).match(/^[+-]/)) {
             return;
         }
 
@@ -72,19 +64,6 @@ export class GroupRegistrationHandler {
             );
         }
 
-        const command =
-            this.parseCommand(
-                message.text,
-            );
-
-        if (!command) {
-            await ctx.reply(
-                'Невірний формат. Використайте +1…+4, +2 Імʼя або -1…-4.',
-            );
-
-            return;
-        }
-
         const replyToMessageId =
             'reply_to_message' in
             message &&
@@ -94,8 +73,11 @@ export class GroupRegistrationHandler {
                     .message_id
                 : undefined;
 
-        const input = {
-            telegramUser: {
+        try {
+            const command = registrationCommandParser.parse(message.text);
+            if (!command) return;
+            const input = {
+                telegramUser: {
                 id: message.from.id,
                 first_name:
                 message.from
@@ -104,55 +86,18 @@ export class GroupRegistrationHandler {
                 message.from
                     .username,
             },
-            chatId:
-            message.chat.id,
-            replyToMessageId,
-            places:
-            command.places,
-            playerName:
-            command.playerName,
-            date:
-            command.date,
-            startTime:
-            command.startTime,
-        };
-
-        try {
-            const result =
-                command.action === '+'
-                    ? await this.services.registration.registerDetailed(
-                        input,
-                    )
-                    : await this.services.registration.unregisterDetailed(
-                        input,
-                    );
-
-            if (
-                result.outcome !==
-                'not_registered'
-            ) {
-                await this.publisher.refreshMessage(
-                    result.training.id,
-                );
-            }
-
-            if (
-                result.outcome ===
-                'not_registered'
-            ) {
-                const feedbackMessage =
-                    await ctx.reply(
-                        'ℹ️ Ви не були зареєстровані на це тренування.',
-                    );
-
-                await this.deleteFeedbackIfEnabled(
-                    ctx,
-                    feedbackMessage
-                        .message_id,
-                );
-
+                chatId: message.chat.id, replyToMessageId,
+                date: command.date, startTime: command.startTime, command,
+            };
+            const resolution = await this.services.registration.resolveCommand(input);
+            if (resolution.kind === 'none') throw new Error(resolution.reason);
+            if (resolution.kind === 'select') {
+                await this.showTrainingSelector(ctx, input, resolution.trainings);
                 return;
             }
+            const results = await this.services.registration.executeCommandAgainstTraining(input, resolution.training.id);
+            const training = results[0]?.training;
+            if (training) await this.publisher.refreshMessage(training.id);
         } catch (error) {
             logger.warn(
                 'registration.action_rejected',
@@ -174,10 +119,62 @@ export class GroupRegistrationHandler {
         }
     }
 
-    private parseCommand(
-        text: string,
-    ): ParsedCommand | undefined {
-        return parseRegistrationCommand(text);
+    async handleSelection(ctx: Context, callback: string): Promise<void> {
+        if (!ctx.from || !ctx.callbackQuery || !('data' in ctx.callbackQuery)) return;
+        const result = this.selections.get(callback);
+        if (result.status !== 'active') {
+            await ctx.answerCbQuery('⚠️ Цей вибір уже неактуальний. Надішліть команду ще раз.', { show_alert: true });
+            return;
+        }
+        const pending = result.value;
+        if (pending.telegramUser.id !== ctx.from.id) {
+            await ctx.answerCbQuery('⚠️ Це меню належить іншому користувачу.', { show_alert: true });
+            return;
+        }
+        if (ctx.chat?.id !== pending.chatId || pending.clubId !== this.services.repositories.clubId) {
+            await ctx.answerCbQuery('⚠️ Цей вибір уже неактуальний. Надішліть команду ще раз.', { show_alert: true });
+            return;
+        }
+        try {
+            const input = { telegramUser: pending.telegramUser, chatId: pending.chatId, command: pending.command };
+            const results = await this.services.registration.executeCommandAgainstTraining(input, pending.trainingId);
+            const training = results[0]?.training;
+            if (training) await this.publisher.refreshMessage(training.id);
+            this.selections.complete(pending.requestId);
+            await ctx.answerCbQuery();
+            await ctx.deleteMessage().catch(() => undefined);
+        } catch (error) {
+            this.selections.complete(pending.requestId);
+            await ctx.answerCbQuery(this.errorFeedback(error), { show_alert: true });
+        }
+    }
+
+    private async showTrainingSelector(
+        ctx: Context,
+        input: { telegramUser: { id: number; first_name?: string; username?: string }; chatId: number; command: RegistrationCommand },
+        trainings: Training[],
+    ): Promise<void> {
+        const pending = this.selections.create({
+            clubId: this.services.repositories.clubId,
+            chatId: input.chatId,
+            telegramUser: input.telegramUser,
+            command: input.command,
+            candidateTrainingIds: trainings.map((training) => training.id),
+        });
+        const rows = trainings.map((training, index) => {
+            const callback = assertCallbackDataValid(`${REGISTRATION_SELECTION_PREFIX}${pending[index].token}`);
+            return [Markup.button.callback(this.trainingLabel(training, trainings), callback)];
+        });
+        await ctx.reply('🏸 Оберіть тренування:', Markup.inlineKeyboard(rows));
+    }
+
+    private trainingLabel(training: Training, candidates: Training[]): string {
+        const sameDate = candidates.every((item) => item.date === training.date);
+        const date = training.date.match(/^\d{4}-(\d{2})-(\d{2})$/);
+        const dateLabel = date ? `${date[2]}.${date[1]}` : training.date;
+        return sameDate
+            ? `${training.startTime}–${training.endTime}`
+            : `${dateLabel} · ${training.startTime}–${training.endTime}`;
     }
 
     private errorFeedback(
@@ -188,13 +185,17 @@ export class GroupRegistrationHandler {
                 ? error.message
                 : '';
 
-        if (
-            message.includes(
-                'already registered',
-            )
-        ) {
-            return 'ℹ️ Цей гравець уже зареєстрований.';
+        if (error instanceof RegistrationCommandParseError) return error.message;
+        if (message.includes('MAX_REGISTRATION_PLACES')) return 'Максимум 4 місця на один запис.';
+        if (message.includes('SELF_NOT_REGISTERED')) return 'Ви не записані на це тренування.';
+        if (message.includes('NAMED_NOT_OWNED')) {
+            const name = message.split(':')[1];
+            return name ? `Ви не додавали гравця «${name}» на це тренування.` : 'Ви не додавали цього гравця на тренування.';
         }
+        if (message.includes('AMBIGUOUS_PLAYER_NAME')) return 'Знайдено кілька гравців із таким імʼям. Уточніть імʼя.';
+        if (message.includes('NO_OPEN_TRAINING')) return 'Зараз немає відкритого запису на тренування.';
+        if (message.includes('NO_REMOVABLE_REGISTRATION')) return 'Не знайдено вашого запису, який можна скасувати.';
+        if (message.includes('TRAINING_NO_LONGER_OPEN')) return 'Це тренування вже недоступне для реєстрації.';
 
         if (
             message.includes(
@@ -218,110 +219,8 @@ export class GroupRegistrationHandler {
         return 'Не вдалося змінити реєстрацію. Перевірте формат і спробуйте ще раз.';
     }
 
-    private async deleteFeedbackIfEnabled(
-        ctx: Context,
-        messageId: number,
-    ): Promise<void> {
-        const settings =
-            await this.services.repositories.settings.get();
-
-        if (
-            !settings.cleanChatMode ||
-            !ctx.chat?.id
-        ) {
-            return;
-        }
-
-        const chatId =
-            ctx.chat.id;
-
-        setTimeout(() => {
-            ctx.telegram
-                .deleteMessage(
-                    chatId,
-                    messageId,
-                )
-                .catch(
-                    error =>
-                        logger.warn(
-                            'telegram.feedback_cleanup_failed',
-                            {
-                                chatId,
-                                messageId,
-                                error,
-                            },
-                        ),
-                );
-        }, 8_000);
-    }
 }
 
-export function parseRegistrationCommand(text: string): ParsedCommand | undefined {
-        const value =
-            text.trim();
-
-        const minus = value.match(/^-(\d+)$/);
-        if (minus && isValidReservedPlaces(Number(minus[1]))) {
-            return {
-                action: '-',
-                places: Number(minus[1]),
-            };
-        }
-
-        const plus =
-            value.match(
-                /^\+(\d+)(?:\s+(.+))?$/i,
-            );
-
-        if (!plus) {
-            return undefined;
-        }
-
-        const places =
-            Number(plus[1]);
-
-        if (!isValidReservedPlaces(places)) return undefined;
-
-        let remainder:
-            | string
-            | undefined =
-            plus[2]?.trim();
-
-        let date:
-            | string
-            | undefined;
-
-        let startTime:
-            | string
-            | undefined;
-
-        const selector =
-            remainder?.match(
-                /^(.*?)(?:\s+)?at\s+(?:(\d{4}-\d{2}-\d{2})\s+)?([01]\d|2[0-3]):([0-5]\d)$/i,
-            );
-
-        if (selector) {
-            const name =
-                selector[1].trim();
-
-            remainder =
-                name.length > 0
-                    ? name
-                    : undefined;
-
-            date =
-                selector[2];
-
-            startTime =
-                `${selector[3]}:${selector[4]}`;
-        }
-
-        return {
-            action: '+',
-            places,
-            playerName:
-            remainder,
-            date,
-            startTime,
-        };
+export function parseRegistrationCommand(text: string): RegistrationCommand | undefined {
+    return registrationCommandParser.parse(text);
 }

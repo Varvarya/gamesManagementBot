@@ -12,6 +12,7 @@ type AddInput = {
     telegramUserId?: number;
     places: number;
     source: ParticipantSource;
+    registeredByTelegramUserId?: number;
     overrideState?: boolean;
 };
 
@@ -27,22 +28,45 @@ export class TrainingParticipantsService {
     constructor(private readonly trainings: TrainingService) {}
 
     async addParticipant(input: AddInput): Promise<ParticipantMutation> {
-        this.validatePlaces(input.places);
-        const displayName = input.displayName.trim();
-        if (!displayName) throw new Error('Participant display name is required');
-        return this.serialize(input.trainingId, async () => {
-            const training = await this.trainings.getRequired(input.trainingId);
-            this.ensureTrainingIsOpen(training, input.overrideState);
+        return (await this.addParticipants([input]))[0];
+    }
 
-            if (this.findParticipant(training, input.playerId)) {
-                throw new Error('Player is already registered');
+    async addParticipants(inputs: AddInput[]): Promise<ParticipantMutation[]> {
+        if (!inputs.length) return [];
+        const trainingId = inputs[0].trainingId;
+        if (inputs.some((input) => input.trainingId !== trainingId)) throw new Error('Participants must belong to one training');
+        for (const input of inputs) {
+            this.validatePlaces(input.places);
+            if (!input.displayName.trim()) throw new Error('Participant display name is required');
+        }
+        return this.serialize(trainingId, async () => {
+            const training = await this.trainings.getRequired(trainingId);
+            this.ensureTrainingIsOpen(training, inputs.some((input) => input.overrideState));
+            const outcomes: ParticipantMutation[] = [];
+            for (const input of inputs) {
+                if (input.registeredByTelegramUserId === undefined && this.findParticipant(training, input.playerId)) {
+                    throw new Error('Player is already registered');
+                }
+                const existing = this.findOwnedParticipant(training, input.playerId, input.registeredByTelegramUserId);
+            if (existing) {
+                if (existing.places + input.places > 4) throw new Error('MAX_REGISTRATION_PLACES');
+                const wasActive = existing.status === 'active';
+                if (wasActive && this.countFreePlaces(training) < input.places) {
+                    training.participants = training.participants.filter((entry) => entry.id !== existing.id);
+                    existing.status = 'waiting';
+                    training.waitlist.push(existing);
+                }
+                existing.places += input.places;
+                existing.updatedAt = nowIso();
+                outcomes.push({ training, outcome: existing.status === 'active' ? 'registered' : 'waitlisted', promotedPlayerIds: wasActive && existing.status === 'waiting' ? this.promoteWaitlist(training) : [] });
+                continue;
             }
-
             const participant: ParticipantEntry = {
                 id: createId('participant'),
                 playerId: input.playerId,
-                displayName,
+                displayName: input.displayName.trim(),
                 telegramUserId: input.telegramUserId,
+                registeredByTelegramUserId: input.registeredByTelegramUserId,
                 places: input.places,
                 source: input.source,
                 status: this.countFreePlaces(training) >= input.places ? 'active' : 'waiting',
@@ -51,14 +75,15 @@ export class TrainingParticipantsService {
             };
             if (participant.status === 'active') training.participants.push(participant);
             else training.waitlist.push(participant);
-
-            const saved = await this.trainings.save(training);
-            logger.info('registration.added', { trainingId: saved.id, playerId: input.playerId, outcome: participant.status, source: input.source });
-            return {
-                training: saved,
+            outcomes.push({
+                training,
                 outcome: participant.status === 'active' ? 'registered' : 'waitlisted',
                 promotedPlayerIds: [],
-            };
+            });
+            }
+            const saved = await this.trainings.save(training);
+            for (const input of inputs) logger.info('registration.added', { trainingId: saved.id, playerId: input.playerId, registeredByTelegramUserId: input.registeredByTelegramUserId, source: input.source });
+            return outcomes.map((outcome) => ({ ...outcome, training: saved }));
         });
     }
 
@@ -104,6 +129,14 @@ export class TrainingParticipantsService {
         });
     }
 
+    async removeOwnedSelf(input: { trainingId: string; playerId: string; registeredByTelegramUserId: number; places: number }): Promise<ParticipantMutation> {
+        return this.removeOwnedEntries(input.trainingId, [{ playerId: input.playerId, places: input.places }], input.registeredByTelegramUserId, true).then((results) => results[0]);
+    }
+
+    async removeOwnedNamed(input: { trainingId: string; playerIds: string[]; registeredByTelegramUserId: number; placesPerEntry: number }): Promise<ParticipantMutation[]> {
+        return this.removeOwnedEntries(input.trainingId, input.playerIds.map((playerId) => ({ playerId, places: input.placesPerEntry })), input.registeredByTelegramUserId, false);
+    }
+
     async removeParticipantPlaces(input: { trainingId: string; playerId: string; places: number }): Promise<Training> {
         this.validatePlaces(input.places);
         return (await this.removeParticipant({ ...input, requestedPlacesToRemove: input.places })).training;
@@ -133,6 +166,39 @@ export class TrainingParticipantsService {
 
     private findParticipant(training: Training, playerId: string): ParticipantEntry | undefined {
         return [...training.participants, ...training.waitlist].find((entry) => entry.playerId === playerId);
+    }
+
+    private findOwnedParticipant(training: Training, playerId: string, owner: number | undefined): ParticipantEntry | undefined {
+        return [...training.participants, ...training.waitlist].find((entry) => entry.playerId === playerId && entry.registeredByTelegramUserId === owner);
+    }
+
+    private async removeOwnedEntries(trainingId: string, targets: Array<{ playerId: string; places: number }>, owner: number, self: boolean): Promise<ParticipantMutation[]> {
+        for (const target of targets) this.validatePlaces(target.places);
+        return this.serialize(trainingId, async () => {
+            const training = await this.trainings.getRequired(trainingId);
+            this.ensureTrainingIsOpen(training);
+            const entries = targets.map((target) => ({ target, entry: this.findOwnedParticipant(training, target.playerId, owner) }));
+            if (entries.some(({ entry }) => !entry)) throw new Error(self ? 'SELF_NOT_REGISTERED' : 'NAMED_NOT_OWNED');
+            let freedActive = false;
+            const results: ParticipantMutation[] = [];
+            for (const { target, entry: value } of entries) {
+                const entry = value!;
+                const wasActive = entry.status === 'active';
+                if (entry.places > target.places) {
+                    entry.places -= target.places;
+                    entry.updatedAt = nowIso();
+                    results.push({ training, outcome: 'decremented', promotedPlayerIds: [] });
+                } else {
+                    training.participants = training.participants.filter((item) => item.id !== entry.id);
+                    training.waitlist = training.waitlist.filter((item) => item.id !== entry.id);
+                    results.push({ training, outcome: 'removed', promotedPlayerIds: [] });
+                }
+                freedActive ||= wasActive;
+            }
+            const promotedPlayerIds = freedActive ? this.promoteWaitlist(training) : [];
+            const saved = await this.trainings.save(training);
+            return results.map((result) => ({ ...result, training: saved, promotedPlayerIds }));
+        });
     }
 
     private promoteWaitlist(training: Training): string[] {

@@ -93,10 +93,7 @@ export class TrainingService {
             return training;
         }
 
-        const openTrainings =
-            await this.repositories.trainings.listOpenByChatId(
-                input.chatId,
-            );
+        const openTrainings = await this.listRelevantOpenByChatId(input.chatId);
 
         if (openTrainings.length === 1 && !input.date && !input.startTime) {
             return openTrainings[0];
@@ -112,6 +109,26 @@ export class TrainingService {
         );
 
         return matches.length === 1 ? matches[0] : undefined;
+    }
+
+    async listRelevantOpenByChatId(chatId: number): Promise<Training[]> {
+        const now = new Date();
+        const today = kyivDate(now);
+        const currentTime = new Intl.DateTimeFormat('en-GB', {
+            timeZone: 'Europe/Kyiv', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+        }).format(now);
+        return (await this.repositories.trainings.listOpenByChatId(chatId))
+            .filter((training) => training.messageId !== undefined)
+            .filter((training) => training.date > today || (training.date === today && training.startTime > currentTime))
+            .sort((a, b) => a.date.localeCompare(b.date) || a.startTime.localeCompare(b.startTime));
+    }
+
+    isRelevantOpen(training: Training, chatId: number): boolean {
+        if (training.chatId !== chatId || training.status !== 'open' || training.messageId === undefined) return false;
+        const now = new Date();
+        const today = kyivDate(now);
+        const currentTime = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Kyiv', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(now);
+        return training.date > today || (training.date === today && training.startTime > currentTime);
     }
 
     async updateStatus(
@@ -228,3 +245,11 @@ const ALLOWED_TRANSITIONS: Record<TrainingStatus, readonly TrainingStatus[]> = {
     finished: ['archived'],
     archived: [],
 };
+
+function kyivDate(value: Date): string {
+    const parts = new Intl.DateTimeFormat('en', {
+        timeZone: 'Europe/Kyiv', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).formatToParts(value);
+    const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value ?? '';
+    return `${part('year')}-${part('month')}-${part('day')}`;
+}

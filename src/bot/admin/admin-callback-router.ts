@@ -1,4 +1,4 @@
-import { Context } from 'telegraf';
+import { Context, Markup } from 'telegraf';
 import { logger } from '../../utils/logger';
 
 import { ServicesContext } from '../../app/services.context';
@@ -118,7 +118,9 @@ export class AdminCallbackRouter {
 
         if (!handler) {
             logger.warn('telegram.admin_callback_unhandled', { callback });
-            await this.services.adminUi.notice(ctx, 'Ця кнопка вже неактуальна. Відкрийте головне меню командою /start.');
+            await ctx.editMessageText('⚠️ Це меню вже неактивне.', Markup.inlineKeyboard([
+                [Markup.button.callback('🏠 Меню клубу', AdminCallbacks.MainMenu)],
+            ])).catch(() => ctx.answerCbQuery('⚠️ Це меню вже неактивне.', { show_alert: true }));
             return;
         }
 

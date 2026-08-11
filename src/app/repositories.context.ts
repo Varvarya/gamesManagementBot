@@ -104,6 +104,7 @@ export class RepositoriesContext {
         logger.info('settings.loaded', { clubId: settings.clubId, title: settings.title, storageSlug: settings.storageSlug, path: this.settings.getFilePath() });
         await this.migrateLegacyTemplateDefaults(settings);
         await this.migrateParticipantDisplayNames();
+        await this.migrateParticipantOwnership();
         if (settings.chatId && !(await this.chats.getById(settings.chatId))) {
             await this.chats.upsert({ id: settings.chatId, name: `Legacy chat ${settings.chatId}`, enabled: true });
             logger.info('storage.legacy_chat_migrated', { chatId: settings.chatId });
@@ -120,6 +121,15 @@ export class RepositoriesContext {
         if (migratedEntries > 0) {
             await this.trainings.saveAll(trainings);
             logger.info('storage.participant_display_names_migrated', { migratedEntries });
+        }
+    }
+
+    private async migrateParticipantOwnership(): Promise<void> {
+        const [trainings, players] = await Promise.all([this.trainings.list(), this.players.list()]);
+        const migratedEntries = backfillParticipantOwnership(trainings, players);
+        if (migratedEntries) {
+            await this.trainings.saveAll(trainings);
+            logger.info('storage.participant_ownership_migrated', { clubId: this.clubId, migratedEntries });
         }
     }
 
@@ -177,6 +187,25 @@ export class RepositoriesContext {
             logger.info('storage.club_defaults_migrated_to_templates', { templateCount: changedTemplates });
         }
     }
+}
+
+export function backfillParticipantOwnership(trainings: Training[], players: Player[]): number {
+    const telegramIds = new Map(players.filter((player) => player.telegramUserId !== undefined).map((player) => [player.id, player.telegramUserId!]));
+    let migratedEntries = 0;
+    for (const training of trainings) {
+        for (const entry of [...training.participants, ...training.waitlist]) {
+            if (entry.registeredByTelegramUserId !== undefined || entry.source !== 'telegram') continue;
+            const telegramUserId = telegramIds.get(entry.playerId);
+            if (telegramUserId !== undefined) {
+                entry.registeredByTelegramUserId = telegramUserId;
+                entry.source = 'telegram_self';
+            } else {
+                entry.source = 'telegram_guest';
+            }
+            migratedEntries++;
+        }
+    }
+    return migratedEntries;
 }
 
 export function backfillParticipantDisplayNames(trainings: Training[], players: Player[]): number {

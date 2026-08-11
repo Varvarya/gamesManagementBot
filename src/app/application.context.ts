@@ -44,6 +44,7 @@ import { AdminNavigationService } from '../bot/navigation/admin-navigation.servi
 import { ClubContextManager, ClubRuntimeContext } from './club-context-manager';
 import { AdminUi } from '../bot/admin/ui/admin-ui';
 import { AdminFlowService } from '../bot/admin/flows/admin-flow.service';
+import { PendingRegistrationSelectionStore, REGISTRATION_SELECTION_PREFIX } from '../bot/registration/pending-registration-selection.store';
 
 
 type ApplicationContextOptions = {
@@ -74,6 +75,7 @@ export class ApplicationContext {
     readonly clubHealth: ClubHealthService;
     readonly navigation: AdminNavigationService;
     readonly clubContexts: ClubContextManager;
+    readonly registrationSelections = new PendingRegistrationSelectionStore();
 
     private readonly superAdminIds: number[];
     private isShuttingDown = false;
@@ -220,6 +222,16 @@ export class ApplicationContext {
         this.bot.on(
             'callback_query',
             async (ctx) => {
+                const callback = 'data' in ctx.callbackQuery ? ctx.callbackQuery.data : '';
+                if (callback.startsWith(REGISTRATION_SELECTION_PREFIX)) {
+                    const clubId = this.registrationSelections.clubIdFor(callback);
+                    if (!clubId) {
+                        await ctx.answerCbQuery('⚠️ Цей вибір уже неактуальний. Надішліть команду ще раз.', { show_alert: true });
+                        return;
+                    }
+                    await (await this.getClubRuntime(clubId)).groupRegistration.handleSelection(ctx, callback);
+                    return;
+                }
                 if (await clubManagementHandler.handleCallback(ctx)) return;
                 const configRuntime = await this.getSelectedClubRuntime(ctx, false);
                 if (configRuntime && await configRuntime.superAdminConfig.handleCallback(ctx)) return;
@@ -336,7 +348,7 @@ export class ApplicationContext {
         const superAdminConfig = new SuperAdminConfigHandler(services, configService, [...this.superAdminIds]);
         const callbackRouter = new AdminCallbackRouter(services, this.callbackAuthorization, context.clubId, this.sessionContexts, navigation, templateFlow, playerFlow, trainingFlow, menu, training, player, template, chat, settings);
         const textRouter = new AdminTextRouter(services, [chat, settingsFlow, superAdminConfig], [templateFlow, playerFlow, trainingFlow, settingsFlow], this.superAdminIds, this.callbackAuthorization, context.clubId, this.sessionContexts);
-        const groupRegistration = new GroupRegistrationHandler(services, publisher);
+        const groupRegistration = new GroupRegistrationHandler(services, publisher, this.registrationSelections);
         return { context, publisher, templateScheduler, cancellationScheduler, menu, callbackRouter, textRouter, groupRegistration, superAdminConfig };
     }
 
