@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile, rename } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, rename, readFile, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -10,6 +10,7 @@ import { SessionContextService } from '../bot/session/session-context.service';
 import { ClubHealthService } from '../domain/clubs/club-health.service';
 import { TemplateSchedulerService } from '../domain/templates/template-scheduler.service';
 import { TrainingPublisherService } from '../domain/trainings/training-publisher.service';
+import { ClubDiagnosticsService } from '../domain/clubs/club-diagnostics.service';
 
 test('lazy multi-club contexts, persisted statistics, switching and restart stay isolated', async (t) => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'gamesbot-multiclub-'));
@@ -117,6 +118,23 @@ test('scheduler job identity contains its club and uses that club context', asyn
     context.services.scheduler.cancelAll();
 });
 
+test('read-only club diagnostics classify storage, settings, ID and repository failures', async (t) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'gamesbot-diagnostics-')); t.after(() => rm(root, { recursive: true, force: true }));
+    const clubs = new ClubRepository(root); const club = await clubs.create({ name: 'WBC', slug: 'wbc', firstAdminTelegramId: 1 }); const service = new ClubDiagnosticsService(clubs, root);
+    const directory = path.join(root, 'wbc'); const saved = path.join(root, 'saved-wbc');
+    await rename(directory, saved); assert.equal((await service.diagnose(club.id)).failure?.code, 'STORAGE_NOT_FOUND'); await assert.rejects(fsStat(directory)); await rename(saved, directory);
+    const settingsPath = path.join(directory, 'settings.json'); const originalSettings = await fsRead(settingsPath);
+    await rm(settingsPath); assert.equal((await service.diagnose(club.id)).failure?.code, 'SETTINGS_NOT_FOUND'); await assert.rejects(fsStat(settingsPath));
+    await writeFile(settingsPath, '{bad', 'utf8'); assert.equal((await service.diagnose(club.id)).failure?.code, 'SETTINGS_INVALID'); assert.equal(await fsRead(settingsPath), '{bad');
+    const wrapped = JSON.parse(originalSettings); wrapped.data.clubId = '123'; await writeFile(settingsPath, JSON.stringify(wrapped), 'utf8'); const mismatch = await service.diagnose(club.id); assert.equal(mismatch.failure?.code, 'CLUB_ID_MISMATCH'); assert.equal(mismatch.settingsClubId, '123');
+    await writeFile(settingsPath, originalSettings, 'utf8'); const chatsPath = path.join(directory, 'chats.json'); await writeFile(chatsPath, '{boom', 'utf8'); const corrupt = await service.diagnose(club.id); assert.equal(corrupt.failure?.code, 'REPOSITORY_CORRUPT'); assert.equal(corrupt.failure?.repository, 'chats'); assert.equal(await fsRead(chatsPath), '{boom');
+});
+
+test('diagnostics preserve unknown errors and a fixed club really reloads', async (t) => {
+    const unknownClubs = { findById: async () => { throw new Error('boom'); } } as unknown as ClubRepository; const unknown = await new ClubDiagnosticsService(unknownClubs, '/unused').diagnose('wbc'); assert.equal(unknown.failure?.code, 'UNKNOWN'); assert.equal(unknown.failure?.technicalMessage, 'boom');
+    const root = await mkdtemp(path.join(os.tmpdir(), 'gamesbot-diagnostic-retry-')); t.after(() => rm(root, { recursive: true, force: true })); const clubs = new ClubRepository(root); const club = await clubs.create({ name: 'WBC', slug: 'wbc', firstAdminTelegramId: 1 }); const manager = new ClubContextManager(root, 'Europe/Kyiv', clubs); const directory = path.join(root, 'wbc'); const saved = path.join(root, 'saved-wbc'); await rename(directory, saved); await assert.rejects(manager.getClubContext(club.id)); await rename(saved, directory); assert.equal((await manager.reloadClubContext(club.id)).clubId, club.id);
+});
+
 async function createTemplates(context: Awaited<ReturnType<ClubContextManager['getClubContext']>>, count: number) {
     const result = [];
     for (let index = 0; index < count; index++) {
@@ -126,3 +144,5 @@ async function createTemplates(context: Awaited<ReturnType<ClubContextManager['g
 }
 
 function escapeRegExp(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+async function fsRead(file: string): Promise<string> { return readFile(file, 'utf8'); }
+async function fsStat(file: string) { return stat(file); }

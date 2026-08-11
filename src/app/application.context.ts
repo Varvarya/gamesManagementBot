@@ -49,6 +49,7 @@ import { AdminUi } from '../bot/admin/ui/admin-ui';
 import { AdminFlowService } from '../bot/admin/flows/admin-flow.service';
 import { PendingRegistrationSelectionStore, REGISTRATION_SELECTION_PREFIX } from '../bot/registration/pending-registration-selection.store';
 import { PlayerDataHandler } from '../bot/admin/handlers/player-data.handler';
+import { ClubDiagnosticsService } from '../domain/clubs/club-diagnostics.service';
 
 
 type ApplicationContextOptions = {
@@ -178,6 +179,7 @@ export class ApplicationContext {
             },
             async (ctx, clubId) => { await (await this.getClubRuntime(clubId)).menu.showMain(ctx); },
             (clubId) => this.invalidateClubRuntime(clubId),
+            (clubId) => new ClubDiagnosticsService(this.clubs, this.dataDir).diagnose(clubId),
         );
 
         this.bot.start(

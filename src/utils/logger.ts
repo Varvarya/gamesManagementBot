@@ -9,7 +9,7 @@ let lastError: LastErrorLog | undefined;
 
 function normalize(value: unknown): unknown {
     if (value instanceof Error) {
-        return { name: value.name, message: value.message };
+        return { name: value.name, message: value.message, stack: value.stack };
     }
     if (typeof value === 'bigint') return value.toString();
     return value;

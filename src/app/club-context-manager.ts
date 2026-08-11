@@ -3,7 +3,7 @@ import path from 'node:path';
 import { ClubRepository } from '../storage/repositories/club.repository';
 import { JsonStorage } from '../storage/jsonStorage';
 import { logger } from '../utils/logger';
-import { RepositoriesContext } from './repositories.context';
+import { RepositoriesContext, RepositoryLoadError } from './repositories.context';
 import { ServicesContext } from './services.context';
 import { SessionContextService } from '../bot/session/session-context.service';
 
@@ -96,11 +96,11 @@ export class ClubContextManager {
         try {
             let rawSettings: unknown;
             try { rawSettings = JSON.parse(await fs.readFile(settingsPath, 'utf8')); }
-            catch (error) { throw new ClubContextLoadError('SETTINGS_INVALID', `Club settings are invalid: ${settingsPath}`, { clubId, storageSlug, settingsPath }, { cause: error }); }
+            catch (error) { throw new ClubContextLoadError('SETTINGS_INVALID', `Club settings are invalid: ${settingsPath}`, { clubId, clubTitle: club.name, storageSlug, directoryPath, settingsPath, technicalMessage: error instanceof Error ? error.message : String(error) }, { cause: error }); }
             const storedSettings = rawSettings && typeof rawSettings === 'object' && 'data' in rawSettings ? (rawSettings as { data: unknown }).data : rawSettings;
-            if (!storedSettings || typeof storedSettings !== 'object' || typeof (storedSettings as { clubId?: unknown }).clubId !== 'string') throw new ClubContextLoadError('SETTINGS_INVALID', `Club settings have no valid clubId: ${settingsPath}`, { clubId, storageSlug, settingsPath });
+            if (!storedSettings || typeof storedSettings !== 'object' || typeof (storedSettings as { clubId?: unknown }).clubId !== 'string') throw new ClubContextLoadError('SETTINGS_INVALID', `Club settings have no valid clubId: ${settingsPath}`, { clubId, clubTitle: club.name, storageSlug, directoryPath, settingsPath, technicalMessage: 'settings.data.clubId must be a string' });
             const storedClubId = (storedSettings as { clubId: string }).clubId;
-            if (storedClubId !== clubId) { logger.error('club.context_id_mismatch', { registryClubId: clubId, settingsClubId: storedClubId, storageSlug }); throw new ClubContextLoadError('CLUB_ID_MISMATCH', `Registry clubId ${clubId} does not match settings.clubId ${storedClubId}`, { registryClubId: clubId, settingsClubId: storedClubId, storageSlug }); }
+            if (storedClubId !== clubId) { logger.error('club.context_id_mismatch', { registryClubId: clubId, settingsClubId: storedClubId, storageSlug, directoryPath, settingsPath }); throw new ClubContextLoadError('CLUB_ID_MISMATCH', `Registry clubId ${clubId} does not match settings.clubId ${storedClubId}`, { clubId, clubTitle: club.name, registryClubId: clubId, settingsClubId: storedClubId, storageSlug, directoryPath, settingsPath, technicalMessage: `Registry clubId ${clubId} does not match settings.clubId ${storedClubId}` }); }
             const storedSlug = (storedSettings as { storageSlug?: unknown }).storageSlug;
             if (typeof storedSlug === 'string' && storedSlug !== storageSlug) throw new ClubContextLoadError('STORAGE_SLUG_MISMATCH', `Registry storageSlug ${storageSlug} does not match settings.storageSlug ${storedSlug}`, { clubId, registryStorageSlug: storageSlug, settingsStorageSlug: storedSlug });
             const storage = new JsonStorage({ dataDir: this.dataDir, storageSlug });
@@ -117,8 +117,8 @@ export class ClubContextManager {
             logger.info('club.context_load_completed', { clubId, storageSlug, path: directoryPath, directoryExists: true, settingsFileExists: true, settingsLoaded: true, settingsClubId: settings.clubId, repositoriesLoaded: true, contextCreated: true, chatCount: chats.length, templateCount: templates.length, playerCount: players.length, trainingCount: trainings.length });
             return { clubId, title: club.name, storageSlug, directoryPath, repositories, services };
         } catch (error) {
-            const normalized = error instanceof ClubContextLoadError ? error : new ClubContextLoadError('REPOSITORY_LOAD_FAILED', `Failed to load repositories for club ${clubId}`, { clubId, storageSlug, directoryPath }, { cause: error });
-            logger.error('club.context_load_failed', { clubId, storageSlug, path: directoryPath, code: normalized.code, reason: normalized.message });
+            const normalized = error instanceof ClubContextLoadError ? error : new ClubContextLoadError('REPOSITORY_LOAD_FAILED', error instanceof Error ? error.message : `Failed to load repositories for club ${clubId}`, { clubId, clubTitle: club.name, storageSlug, directoryPath, settingsPath, repository: error instanceof RepositoryLoadError ? error.repository : undefined, technicalMessage: error instanceof Error ? error.message : String(error) }, { cause: error });
+            logger.error('club.context_load_failed', { clubId, clubTitle: club.name, storageSlug, directoryPath, failureCode: normalized.code, settingsPath, settingsClubId: normalized.details.settingsClubId, repository: normalized.details.repository, technicalMessage: normalized.details.technicalMessage ?? normalized.message, error });
             throw normalized;
         }
     }

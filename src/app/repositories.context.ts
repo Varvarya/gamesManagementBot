@@ -95,15 +95,16 @@ export class RepositoriesContext {
 
     async loadAll(): Promise<void> {
         logger.info('repositories.load_started', { ...this.diagnosticIdentity, path: this.storagePath });
-        await Promise.all([
-            this.chats.load(),
-            this.players.load(),
-            this.trainings.load(),
-            this.templates.load(),
-            this.logs.load(),
-            this.settings.load(),
-            this.scheduleExceptions.load(),
-        ]);
+        const loaders: Array<[string, () => Promise<unknown>]> = [
+            ['chats', () => this.chats.load()], ['players', () => this.players.load()],
+            ['trainings', () => this.trainings.load()], ['schedule', () => this.templates.load()],
+            ['logs', () => this.logs.load()], ['settings', () => this.settings.load()],
+            ['schedule-exceptions', () => this.scheduleExceptions.load()],
+        ];
+        for (const [repository, load] of loaders) {
+            try { await load(); }
+            catch (error) { throw new RepositoryLoadError(repository, error); }
+        }
         await this.migratePlayers();
         const settings = await this.settings.get();
         logger.info('settings.loaded', { clubId: settings.clubId, title: settings.title, storageSlug: settings.storageSlug, path: this.settings.getFilePath() });
@@ -219,6 +220,10 @@ export class RepositoriesContext {
             logger.info('storage.club_defaults_migrated_to_templates', { templateCount: changedTemplates });
         }
     }
+}
+
+export class RepositoryLoadError extends Error {
+    constructor(readonly repository: string, cause: unknown) { super(cause instanceof Error ? cause.message : String(cause), { cause }); this.name = 'RepositoryLoadError'; }
 }
 
 export function backfillParticipantOwnership(trainings: Training[], players: Player[]): number {
