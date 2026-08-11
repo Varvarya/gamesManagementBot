@@ -3,7 +3,7 @@ import test from 'node:test';
 import { AdminCallbacks } from '../bot/admin/callbacks/admin-callbacks';
 import { TemplateFlowHandler } from '../bot/admin/flows/template-flow.handler';
 import { AdminTemplateHandler } from '../bot/admin/handlers/admin-template.handler';
-import { createTemplateDeleteKeyboard, createTemplateKeyboard } from '../bot/admin/keyboards/template.keyboard';
+import { createScheduleKeyboard, createTemplateDeleteKeyboard, createTemplateKeyboard } from '../bot/admin/keyboards/template.keyboard';
 import { PendingRegistrationSelectionStore, REGISTRATION_SELECTION_PREFIX } from '../bot/registration/pending-registration-selection.store';
 import { PlayerService } from '../domain/players/player.service';
 import { RegistrationCommandParser } from '../domain/trainings/registration-command.parser';
@@ -17,7 +17,7 @@ import { ServicesContext } from '../app/services.context';
 import { TrainingPublisherService } from '../domain/trainings/training-publisher.service';
 import { Context } from 'telegraf';
 import { createActiveTrainingsKeyboard, createTrainingEditKeyboard, createTrainingKeyboard, createTrainingWeekKeyboard } from '../bot/admin/keyboards/training.keyboard';
-import { renderTrainingCard } from '../bot/admin/ui/admin-formatters';
+import { formatScheduleLines, renderScheduleOverview, renderTemplateCard, renderTrainingCard } from '../bot/admin/ui/admin-formatters';
 
 const template: TrainingTemplate = {
     id: 'template-short', clubId: 'club', title: 'Evening', chatId: -100, enabled: true,
@@ -39,6 +39,35 @@ test('every visible template card action has exactly one handler and valid callb
     assert.equal(regular.canHandle(`${AdminCallbacks.TemplateDeletePrefix}${template.id}`), true);
     assert.equal(regular.canHandle(`${AdminCallbacks.TemplateDeleteConfirmPrefix}${template.id}`), true);
     assert.equal(regular.canHandle(AdminCallbacks.Schedule), true);
+});
+
+test('schedule formatter groups days by equal time and uses standard Ukrainian weekdays', () => {
+    const slot = (dayOfWeek: number, startTime = '18:00', endTime = '20:00') => ({ id: `s${dayOfWeek}`, dayOfWeek, startTime, endTime, enabled: true });
+    assert.deepEqual(formatScheduleLines([slot(5), slot(1), slot(3)]), ['Пн, Ср, Пт · 18:00–20:00']);
+    assert.deepEqual(formatScheduleLines([1, 2, 3, 4, 5, 6, 7].map((day) => slot(day, '12:00', '14:00'))), ['Пн–Нд · 12:00–14:00']);
+    assert.deepEqual(formatScheduleLines([1, 2, 3, 4, 5].map((day) => slot(day, '09:00', '11:00'))), ['Пн–Пт · 09:00–11:00']);
+    assert.deepEqual(formatScheduleLines([slot(7, '14:00', '16:00'), slot(6, '12:00', '14:00')]), ['Сб · 12:00–14:00', 'Нд · 14:00–16:00']);
+});
+
+test('fifteen slots render as four recurring schedule entries and four template callbacks', () => {
+    const makeTemplate = (id: string, title: string, enabled: boolean, slots: TrainingTemplate['slots']): TrainingTemplate => ({ ...template, id, title, enabled, slots });
+    const slots = (prefix: string, days: number[], startTime: string, endTime: string) => days.map((dayOfWeek) => ({ id: `${prefix}-${dayOfWeek}`, dayOfWeek, startTime, endTime, enabled: true }));
+    const templates = [
+        makeTemplate('day', 'Денні тренування', false, slots('d', [1, 2, 3, 4, 5, 6, 7], '12:00', '14:00')),
+        makeTemplate('evening', 'Вечірні тренування', true, slots('e', [1, 3, 5], '18:00', '20:00')),
+        makeTemplate('night', 'Нічні тренування', false, slots('n', [2, 3, 4], '21:30', '23:30')),
+        makeTemplate('weekend', 'Тренування на вихідних', false, [...slots('w', [6], '12:00', '14:00'), ...slots('w2', [7], '14:00', '16:00')]),
+    ];
+    assert.equal(templates.reduce((count, item) => count + item.slots.length, 0), 15);
+    const screen = renderScheduleOverview(templates);
+    assert.equal((screen.match(/тренування/giu) ?? []).length, 4);
+    assert.match(screen, /⚪ Денні тренування\nПн–Нд · 12:00–14:00\n⏸ Пауза/);
+    assert.match(screen, /🟢 Вечірні тренування\nПн, Ср, Пт · 18:00–20:00/);
+    assert.match(screen, /Сб · 12:00–14:00\nНд · 14:00–16:00/);
+    const selectorCallbacks = callbacksOf(createScheduleKeyboard(templates)).filter((value) => value.startsWith(AdminCallbacks.TemplatePrefix));
+    assert.deepEqual(selectorCallbacks, templates.map((item) => `${AdminCallbacks.TemplatePrefix}${item.id}`));
+    assert.equal(new Set(selectorCallbacks).size, 4);
+    assert.match(renderTemplateCard(templates[3], 'Основний'), /Сб · 12:00–14:00\nНд · 14:00–16:00/);
 });
 
 test('two open trainings select the requested target; removal smart-filters and replies win', async () => {

@@ -14,8 +14,8 @@ import {
 } from '../keyboards/template.keyboard';
 
 import {
-    formatDay,
-    formatTimeRange,
+    formatScheduleLines,
+    renderScheduleOverview,
     renderTemplateCard,
 } from '../ui/admin-formatters';
 
@@ -154,11 +154,7 @@ export class AdminTemplateHandler {
 
         await this.services.adminUi.show(
             ctx,
-            [
-                '📅 Розклад',
-                '',
-                templates.length > 0 ? templates.flatMap((template) => template.slots.map((slot) => `${formatDay(slot.dayOfWeek).slice(0, 2)} · ${slot.startTime}–${slot.endTime} · ${template.title}${template.enabled && slot.enabled ? '' : ' · пауза'}`)).map((line, index) => `${index + 1}. ${line}`).join('\n') : 'Записів поки немає.',
-            ].join('\n'),
+            renderScheduleOverview(templates),
             createScheduleKeyboard(
                 templates,
             ),
@@ -223,34 +219,16 @@ export class AdminTemplateHandler {
                 templateId,
             );
 
-        const slotLines =
-            template.slots.length > 0
-                ? template.slots.flatMap(
-                    (
-                        slot,
-                        index,
-                    ) => [
-                        index > 0
-                            ? ''
-                            : undefined,
-                        `📅 ${formatDay(
-                            slot.dayOfWeek,
-                        )}`,
-                        `🕐 ${formatTimeRange(
-                            slot.startTime,
-                            slot.endTime,
-                        )}`,
-                    ],
-                )
-                : ['⚠️ У розкладі немає часу'];
+        const slotLines = formatScheduleLines(template.slots);
 
         await this.services.adminUi.show(
             ctx,
             [
                 `Видалити «${template.title}» з розкладу?`,
                 '',
-                ...slotLines,
+                ...(slotLines.length ? slotLines : ['⚠️ У розкладі немає часу']),
                 '',
+                'Майбутні автоматичні публікації буде зупинено.',
                 'Уже опубліковані тренування не буде видалено.',
             ]
                 .filter(
@@ -274,7 +252,7 @@ export class AdminTemplateHandler {
         const settings = await this.services.repositories.settings.get();
         const templates = await this.services.templates.listByClubId(settings.clubId);
         templates.sort((first, second) => this.compareTemplates(first, second));
-        await this.services.adminUi.show(ctx, templates.length ? '📅 Розклад' : '📅 Розклад\n\nЗаписів поки немає.', createScheduleKeyboard(templates));
+        await this.services.adminUi.show(ctx, renderScheduleOverview(templates), createScheduleKeyboard(templates));
     }
 
     private compareTemplates(

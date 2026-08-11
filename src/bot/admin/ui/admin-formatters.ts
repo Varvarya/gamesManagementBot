@@ -1,6 +1,6 @@
 import { Player } from '../../../domain/players/player.types';
 import { ChatConfig } from '../../../domain/chats/chat.types';
-import { TrainingTemplate } from '../../../domain/templates/template.types';
+import { TrainingTemplate, TrainingTemplateSlot } from '../../../domain/templates/template.types';
 import { Training } from '../../../domain/trainings/training.types';
 
 const DAY_NAMES: Record<number, string> = {
@@ -67,6 +67,41 @@ export function formatTimeRange(
     endTime: string,
 ): string {
     return `${startTime}–${endTime}`;
+}
+
+/** Formats internal recurring slots as compact, user-facing schedule lines. */
+export function formatScheduleLines(slots: readonly TrainingTemplateSlot[]): string[] {
+    const byTime = new Map<string, { startTime: string; endTime: string; days: number[] }>();
+    for (const slot of slots) {
+        const key = `${slot.startTime}\u0000${slot.endTime}`;
+        const group = byTime.get(key) ?? { startTime: slot.startTime, endTime: slot.endTime, days: [] };
+        if (!group.days.includes(slot.dayOfWeek)) group.days.push(slot.dayOfWeek);
+        byTime.set(key, group);
+    }
+    return [...byTime.values()]
+        .map((group) => ({ ...group, days: group.days.sort((a, b) => a - b) }))
+        .sort((a, b) => (a.days[0] ?? 8) - (b.days[0] ?? 8) || a.startTime.localeCompare(b.startTime) || a.endTime.localeCompare(b.endTime))
+        .map((group) => `${formatDaySet(group.days)} · ${formatTimeRange(group.startTime, group.endTime)}`);
+}
+
+export function renderScheduleOverview(templates: readonly TrainingTemplate[]): string {
+    if (!templates.length) return '📅 Розклад\n\nРозклад поки порожній.';
+    return ['📅 Розклад', '', ...templates.flatMap((template, index) => {
+        const lines = formatScheduleLines(template.slots);
+        return [
+            `${template.enabled ? '🟢' : '⚪'} ${template.title}`,
+            ...(lines.length ? lines : ['Час не налаштовано']),
+            ...(!template.enabled ? ['⏸ Пауза'] : []),
+            ...(index < templates.length - 1 ? [''] : []),
+        ];
+    })].join('\n');
+}
+
+function formatDaySet(days: readonly number[]): string {
+    if (days.length >= 3 && days.every((day, index) => index === 0 || day === days[index - 1] + 1)) {
+        return `${formatShortDay(days[0])}–${formatShortDay(days[days.length - 1])}`;
+    }
+    return days.map(formatShortDay).join(', ');
 }
 
 export function countTrainingPlaces(
@@ -188,8 +223,7 @@ export function renderTemplateCard(
     template: TrainingTemplate,
     chatName?: string,
 ): string {
-    const days = template.slots.map((slot) => formatShortDay(slot.dayOfWeek)).join(', ');
-    const ranges = [...new Set(template.slots.map((slot) => formatTimeRange(slot.startTime, slot.endTime)))];
+    const scheduleLines = formatScheduleLines(template.slots);
     const publication = template.publishDaysBefore === 1 ? `напередодні о ${template.publishTime}` : `за ${template.publishDaysBefore} дн. о ${template.publishTime}`;
 
     return [
@@ -198,14 +232,16 @@ export function renderTemplateCard(
             ? `📍 ${template.location}`
             : undefined,
         '',
-        days,
-        ...ranges,
+        ...(scheduleLines.length ? scheduleLines : ['Час не налаштовано']),
         '',
-        `${template.placesLimit} місць · мінімум ${template.minPlayers}`,
-        `Публікація: ${publication}`,
-        `Чат: ${chatName ?? template.chatId}`,
+        `👥 Місць: ${template.placesLimit}`,
+        `🎯 Мінімум: ${template.minPlayers}`,
         '',
-        template.enabled ? '🟢 Активне' : '⏸ На паузі',
+        `📣 Публікація:\n${publication}`,
+        '',
+        `💬 Чат:\n${chatName ?? template.chatId}`,
+        '',
+        template.enabled ? '🟢 Активне' : '⏸ Пауза',
     ]
         .filter(
             (line): line is string =>

@@ -2,19 +2,22 @@ import { Markup } from 'telegraf';
 import { TrainingTemplate } from '../../../domain/templates/template.types';
 import { ChatConfig } from '../../../domain/chats/chat.types';
 import { AdminCallbacks } from '../callbacks/admin-callbacks';
+import { callbackButton } from '../../callback-data';
 
 export function createScheduleKeyboard(
     templates: TrainingTemplate[],
 ) {
     return Markup.inlineKeyboard([
         ...templates.map((template) => [
-            Markup.button.callback(
+            callbackButton(
                 `${
                     template.enabled
                         ? '🟢'
-                        : '⚪️'
+                        : '⚪'
                 } ${template.title}`,
                 `${AdminCallbacks.TemplatePrefix}${template.id}`,
+                AdminCallbacks.TemplatePrefix,
+                'schedule-entry',
             ),
         ]),
         [
