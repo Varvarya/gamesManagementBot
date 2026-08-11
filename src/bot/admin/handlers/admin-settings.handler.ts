@@ -10,8 +10,16 @@ import { TemplateSchedulerService } from '../../../domain/templates/template-sch
 import { canManageClubAdmins, isClubOwner } from '../../../domain/settings/club-admin-authorization';
 import { ClubSettings } from '../../../domain/settings/settings.types';
 import { logger } from '../../../utils/logger';
+import { AdminFlowState } from '../flows/admin-flow.types';
 
 export class AdminSettingsHandler {
+    /** Confirmation states are consumed by inline callbacks, not text messages. */
+    readonly callbackStates: readonly AdminFlowState[] = [
+        'waiting_admin_add_confirmation',
+        'waiting_admin_remove_confirmation',
+        'waiting_owner_transfer_confirmation',
+    ];
+
     constructor(
         private readonly services: ServicesContext,
         private readonly cancellationScheduler: TrainingCancellationScheduler,

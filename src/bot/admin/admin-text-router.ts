@@ -18,6 +18,10 @@ export type TextFlowHandler = {
     handleText(ctx: Context, text: string): Promise<void>;
 };
 
+export type CallbackFlowStateProvider = {
+    readonly callbackStates: readonly AdminFlowState[];
+};
+
 export class AdminTextRouter {
     constructor(
         private readonly services: ServicesContext,
@@ -27,6 +31,7 @@ export class AdminTextRouter {
         private readonly authorization?: CallbackAuthorizationService,
         private readonly activeClubId?: string,
         private readonly sessionContexts?: SessionContextService,
+        private readonly callbackStateProviders: readonly CallbackFlowStateProvider[] = [],
     ) {
         this.validateStateCoverage();
     }
@@ -90,6 +95,9 @@ export class AdminTextRouter {
         for (const handler of this.textHandlers) {
             for (const state of handler.textStates) covered.add(state);
             for (const state of handler.callbackStates ?? []) covered.add(state);
+        }
+        for (const provider of this.callbackStateProviders) {
+            for (const state of provider.callbackStates) covered.add(state);
         }
         const orphaned = ADMIN_FLOW_STATES.filter((state) => !covered.has(state));
         if (orphaned.length) throw new Error(`Orphaned admin flow states: ${orphaned.join(', ')}`);

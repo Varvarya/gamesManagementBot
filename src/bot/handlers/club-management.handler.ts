@@ -289,24 +289,40 @@ export class ClubManagementHandler {
         const club = await this.clubs.findById(clubId);
         if (!club || !ctx.from) { await ctx.reply('Клуб не знайдено.'); return true; }
         const activeClubIdBefore = this.sessionContexts.get(ctx.from.id)?.activeClubId;
-        logger.info('club.open_debug', { telegramUserId: ctx.from.id, selectedClubId: clubId, activeClubIdBefore, registryClubFound: true, registryClubId: club.id, title: club.name, storageSlug: club.slug, repositoriesLoaded: false });
         let prepared: PreparedClubContext | undefined;
         try {
             prepared = this.prepareClubContext ? await this.prepareClubContext(club.id) : undefined;
         } catch (error) {
             this.clubLoadFailures.set(club.id, error);
-            logger.error('club.open_debug', { telegramUserId: ctx.from.id, selectedClubId: club.id, activeClubIdBefore, registryClubFound: true, registryClubId: club.id, title: club.name, storageSlug: club.slug, repositoriesLoaded: false, activeClubIdAfter: this.sessionContexts.get(ctx.from.id)?.activeClubId, reason: loadErrorCode(error) });
+            logOpenStageFailure(club.id, 'context_acquisition', error, ctx.from.id);
             return this.showClubLoadFailure(ctx, club.id, club.name, club.shortId);
         }
-        this.clubLoadFailures.delete(club.id);
-        if (this.navigation) {
-            await this.navigation.switchMode(ctx, SessionMode.CLUB_ADMIN, club);
-            if (this.renderClubRoot) await this.renderClubRoot(ctx, club.id); else await ctx.reply(`🏸 ${club.name}`);
-        } else {
-            this.sessionContexts.enterClubAdmin(ctx.from.id, club);
-            await ctx.reply(`🏸 ${club.name}\n\nРежим адміністратора клубу`, Markup.inlineKeyboard([[Markup.button.callback('🏠 Відкрити меню клубу', 'm')], [Markup.button.callback('🌐 Режим суперадміністратора', 'mode:super')]]));
+        logger.info('club.open_stage_completed', { clubId: club.id, telegramUserId: ctx.from.id, stage: 'context_acquired' });
+        if (!prepared || prepared.clubId !== club.id) {
+            const error = Object.assign(new Error(`Acquired context ${prepared?.clubId ?? 'undefined'} does not match ${club.id}`), { code: 'CONTEXT_MISMATCH' });
+            this.clubLoadFailures.set(club.id, error); logOpenStageFailure(club.id, 'context_validation', error, ctx.from.id); return this.showClubLoadFailure(ctx, club.id, club.name, club.shortId);
         }
-        logger.info('club.open_debug', { telegramUserId: ctx.from.id, selectedClubId: club.id, activeClubIdBefore, registryClubFound: true, registryClubId: club.id, title: club.name, storageSlug: club.slug, directoryPath: prepared?.directoryPath, directoryExists: true, settingsPath: prepared?.settingsPath, settingsExists: true, settingsClubId: prepared?.settingsClubId, repositoriesLoaded: true, contextClubId: prepared?.clubId, activeClubIdAfter: this.sessionContexts.get(ctx.from.id)?.activeClubId });
+        logger.info('club.open_stage_completed', { clubId: club.id, telegramUserId: ctx.from.id, stage: 'context_validated' });
+        let authorized: boolean;
+        try { authorized = await this.authorization.canAccess({ telegramUserId: ctx.from.id, requiredAccess: 'club_admin', activeClubId: club.id }); }
+        catch (error) { logOpenStageFailure(club.id, 'authorization', error, ctx.from.id); await ctx.reply('Не вдалося перевірити доступ до клубу.'); return true; }
+        if (!authorized) { logger.warn('club.open_stage_failed', { clubId: club.id, telegramUserId: ctx.from.id, stage: 'authorization', errorName: 'AccessDenied', errorMessage: 'Club administrator access denied' }); await ctx.reply('⛔ У вас немає доступу до цього клубу.'); return true; }
+        this.clubLoadFailures.delete(club.id);
+        try {
+            if (this.navigation) await this.navigation.switchMode(ctx, SessionMode.CLUB_ADMIN, club);
+            else this.sessionContexts.enterClubAdmin(ctx.from.id, club);
+        } catch (error) { logOpenStageFailure(club.id, 'session_activation', error, ctx.from.id); await ctx.reply('Не вдалося відкрити режим клубу. Спробуйте ще раз.'); return true; }
+        logger.info('club.open_stage_completed', { clubId: club.id, telegramUserId: ctx.from.id, stage: 'session_activated', activeClubId: this.sessionContexts.get(ctx.from.id)?.activeClubId });
+        logger.info('club.open_stage_completed', { clubId: club.id, telegramUserId: ctx.from.id, stage: 'authorization_verified' });
+        try {
+            if (this.renderClubRoot) await this.renderClubRoot(ctx, club.id);
+            else await ctx.reply(`🏸 ${club.name}\n\nРежим адміністратора клубу`, Markup.inlineKeyboard([[Markup.button.callback('🏠 Відкрити меню клубу', 'm')], [Markup.button.callback('🌐 Режим суперадміністратора', 'mode:super')]]));
+        } catch (error) {
+            logOpenStageFailure(club.id, 'root_render', error, ctx.from.id);
+            await ctx.reply('⚠️ Дані клубу завантажено, але меню не вдалося відкрити. Спробуйте ще раз.');
+            return true;
+        }
+        logger.info('club.open_stage_completed', { clubId: club.id, telegramUserId: ctx.from.id, stage: 'root_rendered', activeClubIdBefore, activeClubIdAfter: this.sessionContexts.get(ctx.from.id)?.activeClubId });
         return true;
     }
     private async showClubLoadFailure(ctx: Context, clubId: string, clubName: string, shortId: string): Promise<true> { const keyboard = Markup.inlineKeyboard([[Markup.button.callback('🔄 Спробувати ще раз', `superadmin:club:retry:${shortId}`)], [Markup.button.callback('🩺 Діагностика', `superadmin:club:diag:${shortId}`)], [Markup.button.callback('◀️ До списку клубів', 'superadmin:clubs')]]); const text = `⚠️ Не вдалося завантажити дані клубу.\n\nКлуб:\n${clubName}`; if (this.navigation) await this.navigation.showFresh(ctx, text, keyboard); else await ctx.reply(text, keyboard); return true; }
@@ -347,7 +363,8 @@ function statusLabel(status: ClubHealth['status']): string {
     return status === 'active' ? '🟢 Активний' : status === 'setup_required' ? '🟡 Не налаштований' : status === 'inactive' ? '🔴 Неактивний' : status === 'disabled' ? '⛔ Вимкнений' : '🔴 Пошкоджений';
 }
 
-function loadErrorCode(error: unknown): string { return error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' ? error.code : 'REPOSITORY_LOAD_FAILED'; }
+function loadErrorCode(error: unknown): string { return error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' ? error.code : 'UNKNOWN'; }
+function logOpenStageFailure(clubId: string, stage: string, error: unknown, telegramUserId: number): void { logger.error('club.open_stage_failed', { clubId, telegramUserId, stage, errorName: error instanceof Error ? error.name : typeof error, errorMessage: error instanceof Error ? error.message : String(error), errorStack: error instanceof Error ? error.stack : undefined, error }); }
 function loadErrorLabel(error: unknown): string { switch (loadErrorCode(error)) { case 'CLUB_NOT_IN_REGISTRY': return 'Клуб не знайдено в реєстрі'; case 'STORAGE_NOT_FOUND': return 'Папку даних не знайдено'; case 'SETTINGS_NOT_FOUND': return 'Файл settings.json не знайдено'; case 'SETTINGS_INVALID': return 'Файл settings.json пошкоджено'; case 'CLUB_ID_MISMATCH': return 'settings.clubId не збігається з реєстром'; case 'STORAGE_SLUG_MISMATCH': return 'Папка клубу не збігається з реєстром'; default: return 'Не вдалося завантажити дані клубу'; } }
 function safeTechnicalMessage(error: unknown): string { return error instanceof Error ? error.message : String(error ?? 'Причину не класифіковано'); }
 function renderClubDiagnostics(name: string, value: ClubDiagnostics): string {

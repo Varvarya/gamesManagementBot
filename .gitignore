@@ -19,5 +19,6 @@ yarn-error.log*
 !src/e2e/multi-club-context.test.ts
 !src/e2e/zero-club-startup.test.ts
 !src/e2e/current-ux-regressions.test.ts
+!src/e2e/club-open-contract.test.ts
 !src/domain/trainings/human-registration.test.ts
 !src/domain/players/player-data.test.ts
