@@ -100,6 +100,7 @@ export class RepositoriesContext {
             this.logs.load(),
             this.settings.load(),
         ]);
+        await this.migratePlayers();
         const settings = await this.settings.get();
         logger.info('settings.loaded', { clubId: settings.clubId, title: settings.title, storageSlug: settings.storageSlug, path: this.settings.getFilePath() });
         await this.migrateLegacyTemplateDefaults(settings);
@@ -110,6 +111,33 @@ export class RepositoriesContext {
             logger.info('storage.legacy_chat_migrated', { chatId: settings.chatId });
         }
         logger.info('repositories.load_completed', { clubId: settings.clubId, title: settings.title, storageSlug: settings.storageSlug, path: this.storagePath });
+    }
+
+    private async migratePlayers(): Promise<void> {
+        const players = await this.players.list();
+        let changed = 0;
+        const now = nowIsoValue();
+        for (const player of players) {
+            let itemChanged = false;
+            if (!Array.isArray(player.aliases)) { player.aliases = []; itemChanged = true; }
+            const unique = new Map<string, string>();
+            for (const alias of player.aliases) {
+                const value = String(alias).trim().replace(/\s+/g, ' ');
+                if (value) unique.set(value.toLocaleLowerCase('uk'), value);
+            }
+            const aliases = [...unique.values()];
+            if (JSON.stringify(aliases) !== JSON.stringify(player.aliases)) { player.aliases = aliases; itemChanged = true; }
+            if (typeof player.isActive !== 'boolean') { player.isActive = true; itemChanged = true; }
+            if (typeof player.isConfirmed !== 'boolean') { player.isConfirmed = false; itemChanged = true; }
+            if (!player.source) { player.source = 'migration'; itemChanged = true; }
+            if (!isIsoTimestamp(player.createdAt)) { player.createdAt = now; itemChanged = true; }
+            if (!isIsoTimestamp(player.updatedAt)) { player.updatedAt = player.createdAt; itemChanged = true; }
+            if (itemChanged) changed++;
+        }
+        if (changed) {
+            await this.players.saveAll(players);
+            logger.info('storage.players_migrated', { clubId: this.clubId, changed });
+        }
     }
 
     private async migrateParticipantDisplayNames(): Promise<void> {
@@ -207,6 +235,12 @@ export function backfillParticipantOwnership(trainings: Training[], players: Pla
     }
     return migratedEntries;
 }
+
+function isIsoTimestamp(value: string | undefined): boolean {
+    return typeof value === 'string' && !Number.isNaN(Date.parse(value)) && value.includes('T');
+}
+
+function nowIsoValue(): string { return new Date().toISOString(); }
 
 export function backfillParticipantDisplayNames(trainings: Training[], players: Player[]): number {
     const playerNames = new Map(players.map((player) => [player.id, player.displayName]));

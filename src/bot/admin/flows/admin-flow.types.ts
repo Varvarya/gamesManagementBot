@@ -27,6 +27,10 @@ export const ADMIN_FLOW_STATES = [
     'waiting_setting_value',
     'waiting_admin_id',
     'waiting_config_import',
+    'waiting_player_import_file',
+    'player_import_preview',
+    'player_import_conflicts',
+    'player_import_ready',
 ] as const;
 
 export type AdminFlowState = typeof ADMIN_FLOW_STATES[number];

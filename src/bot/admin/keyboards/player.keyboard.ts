@@ -22,12 +22,37 @@ export function createPlayersKeyboard(
         [Markup.button.callback('🆕 Очікують підтвердження', AdminCallbacks.UnconfirmedPlayers)],
         [Markup.button.callback('👥 Переглянути гравців', AdminCallbacks.AllPlayers)],
         [Markup.button.callback('🔴 Неактивні гравці', AdminCallbacks.InactivePlayers)],
+        [Markup.button.callback('📥 Імпорт', AdminCallbacks.PlayerImport), Markup.button.callback('📤 Експорт', AdminCallbacks.PlayerExport)],
+        [Markup.button.callback('🧹 Дублікати', AdminCallbacks.PlayerDuplicates)],
         [
             Markup.button.callback(
                 '◀️ Назад',
                 AdminCallbacks.Back,
             ),
         ],
+    ]);
+}
+
+export function createPlayerImportKeyboard() {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback('📄 Завантажити шаблон CSV', AdminCallbacks.PlayerImportTemplate)],
+        [Markup.button.callback('❓ Формат', AdminCallbacks.PlayerImportFormat)],
+        [Markup.button.callback('◀️ Назад', AdminCallbacks.Players)],
+    ]);
+}
+
+export function createPlayerImportPreviewKeyboard(blocked: boolean) {
+    return Markup.inlineKeyboard([
+        ...(blocked ? [[Markup.button.callback('⏭ Пропустити конфліктні рядки', AdminCallbacks.PlayerImportSkipConflicts)]] : [[Markup.button.callback('✅ Імпортувати', AdminCallbacks.PlayerImportConfirm)]]),
+        [Markup.button.callback('❌ Скасувати', AdminCallbacks.PlayerImportCancel)],
+    ]);
+}
+
+export function createPlayerExportKeyboard() {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback('📊 CSV', AdminCallbacks.PlayerExportCsv)],
+        [Markup.button.callback('📦 JSON backup', AdminCallbacks.PlayerExportJson)],
+        [Markup.button.callback('◀️ Назад', AdminCallbacks.Players)],
     ]);
 }
 

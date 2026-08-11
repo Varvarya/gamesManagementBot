@@ -18,6 +18,7 @@ import { SessionContextService } from '../session/session-context.service';
 import { SessionMode } from '../session/session-context.service';
 import { AdminNavigationService } from '../navigation/admin-navigation.service';
 import { AdminCallbacks } from './callbacks/admin-callbacks';
+import { PlayerDataHandler } from './handlers/player-data.handler';
 
 export type CallbackHandler = {
     canHandle(callback: string): boolean;
@@ -64,6 +65,7 @@ export class AdminCallbackRouter {
         templateHandler: AdminTemplateHandler,
         chatHandler: AdminChatHandler,
         settingsHandler: AdminSettingsHandler,
+        playerDataHandler: PlayerDataHandler,
     ) {
         this.handlers = [
             // Flow handlers
@@ -78,6 +80,7 @@ export class AdminCallbackRouter {
             templateHandler,
             chatHandler,
             settingsHandler,
+            playerDataHandler,
         ];
     }
 

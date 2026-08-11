@@ -45,6 +45,7 @@ import { ClubContextManager, ClubRuntimeContext } from './club-context-manager';
 import { AdminUi } from '../bot/admin/ui/admin-ui';
 import { AdminFlowService } from '../bot/admin/flows/admin-flow.service';
 import { PendingRegistrationSelectionStore, REGISTRATION_SELECTION_PREFIX } from '../bot/registration/pending-registration-selection.store';
+import { PlayerDataHandler } from '../bot/admin/handlers/player-data.handler';
 
 
 type ApplicationContextOptions = {
@@ -340,14 +341,15 @@ export class ApplicationContext {
         const menu = new AdminMenuHandler(services, this.superAdminIds, this.sessionContexts);
         const training = new AdminTrainingHandler(services, publisher);
         const player = new AdminPlayerHandler(services);
+        const playerData = new PlayerDataHandler(services, backups);
         const template = new AdminTemplateHandler(services, templateScheduler);
         const settings = new AdminSettingsHandler(services, cancellationScheduler, backups, templateScheduler);
         const chat = new AdminChatHandler(services);
         const settingsFlow = new SettingsFlowHandler(services, settings);
         const configService = new SuperAdminConfigService(repositories, templateScheduler, backups);
         const superAdminConfig = new SuperAdminConfigHandler(services, configService, [...this.superAdminIds]);
-        const callbackRouter = new AdminCallbackRouter(services, this.callbackAuthorization, context.clubId, this.sessionContexts, navigation, templateFlow, playerFlow, trainingFlow, menu, training, player, template, chat, settings);
-        const textRouter = new AdminTextRouter(services, [chat, settingsFlow, superAdminConfig], [templateFlow, playerFlow, trainingFlow, settingsFlow], this.superAdminIds, this.callbackAuthorization, context.clubId, this.sessionContexts);
+        const callbackRouter = new AdminCallbackRouter(services, this.callbackAuthorization, context.clubId, this.sessionContexts, navigation, templateFlow, playerFlow, trainingFlow, menu, training, player, template, chat, settings, playerData);
+        const textRouter = new AdminTextRouter(services, [chat, settingsFlow, superAdminConfig, playerData], [templateFlow, playerFlow, trainingFlow, settingsFlow], this.superAdminIds, this.callbackAuthorization, context.clubId, this.sessionContexts);
         const groupRegistration = new GroupRegistrationHandler(services, publisher, this.registrationSelections);
         return { context, publisher, templateScheduler, cancellationScheduler, menu, callbackRouter, textRouter, groupRegistration, superAdminConfig };
     }

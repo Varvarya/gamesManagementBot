@@ -14,7 +14,7 @@
     "restore": "node dist/cli.js restore",
     "health": "node dist/healthcheck.js",
     "test:club-admin": "node --import tsx --test src/domain/settings/club-admin-authorization.test.ts",
-    "test": "node --import tsx --test src/production-readiness.test.ts src/e2e/production-smoke.test.ts src/e2e/multi-club-context.test.ts src/e2e/zero-club-startup.test.ts src/e2e/current-ux-regressions.test.ts src/domain/trainings/human-registration.test.ts"
+    "test": "node --import tsx --test src/production-readiness.test.ts src/e2e/production-smoke.test.ts src/e2e/multi-club-context.test.ts src/e2e/zero-club-startup.test.ts src/e2e/current-ux-regressions.test.ts src/domain/trainings/human-registration.test.ts src/domain/players/player-data.test.ts"
   },
   "dependencies": {
     "dotenv": "^17.4.2",

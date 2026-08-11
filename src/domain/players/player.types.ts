@@ -12,7 +12,7 @@ export type Player = {
     aliases: string[];
     isConfirmed: boolean;
     isActive: boolean;
-    source?: 'admin' | 'telegram' | 'telegram_guest';
+    source?: 'admin' | 'telegram' | 'csv_import' | 'telegram_guest' | 'migration';
 
     createdAt: string;
     updatedAt: string;

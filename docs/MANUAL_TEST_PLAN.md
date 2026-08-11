@@ -8,13 +8,12 @@ Use a test bot and a copy of production data. Record `DATA_DIR`, the intended cl
 
 ## New club and first launch
 
-1. Configure `CLUB_NAME=RSP Київ`, start the bot, and open `/start` as the owner.
-2. Confirm every menu header says `RSP Київ`, never `Default`.
-3. Inspect `DATA_DIR`: `rsp-kyiv/` must exist and `default/` must not be newly created.
-4. Inspect `rsp-kyiv/settings.json`. Confirm `title` is `RSP Київ`, `storageSlug` is `rsp-kyiv`, and `clubId`, `timezone`, `admins`, `cleanChatMode`, `createdAt`, and `updatedAt` are present.
-5. Confirm `chats.json`, `templates.json`, `trainings.json`, `players.json`, and `logs.json` appear in this same directory after each feature is used. Create a backup in Telegram and confirm it appears under `rsp-kyiv/backups/`.
-
-Repeat slug inspection with `Бадмінтон Харків` (`badminton-kharkiv`) and `Клуб "Sunrise"` (`klub-sunrise`).
+1. Start with an empty `DATA_DIR` and no legacy club-name environment variable.
+2. Confirm the bot starts and creates only `_system/clubs.json` and `_system/club-creation-requests.json`.
+3. Open `/start` as Super Admin. Confirm the zero-club screen offers direct creation and creation requests.
+4. Create `RSP Київ` through Super Admin. Only now confirm `rsp-kyiv/` exists and `default/` does not.
+5. Inspect `rsp-kyiv/settings.json`. Confirm `title`, `storageSlug`, `clubId`, timezone, administrators and ISO timestamps are present.
+6. Repeat with a normal user request. Confirm no folder exists before approval and the requester becomes owner after approval.
 
 ## Legacy `default` migration
 

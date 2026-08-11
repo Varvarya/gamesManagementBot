@@ -26,6 +26,11 @@ export class PlayerService {
         if (existing) {
             let changed = false;
 
+            if (!existing.isConfirmed) {
+                existing.isConfirmed = true;
+                changed = true;
+            }
+
             if (existing.telegramName !== user.first_name) {
                 existing.telegramName = user.first_name;
                 changed = true;
@@ -60,7 +65,7 @@ export class PlayerService {
             username: user.username,
 
             aliases: [],
-            isConfirmed: false,
+            isConfirmed: true,
             isActive: true,
             source: 'telegram',
 
@@ -69,7 +74,7 @@ export class PlayerService {
         };
 
         await this.repositories.players.save(player);
-        logger.info('player.created', { playerId: player.id, source: 'telegram', confirmed: false });
+        logger.info('player.created', { playerId: player.id, source: 'telegram', confirmed: true });
 
         return player;
         });
@@ -281,6 +286,17 @@ export class PlayerService {
         displayName: string,
         allowDuplicate = false,
     ): Promise<Player> {
+        return this.createManualPlayer({ displayName, allowDuplicate });
+    }
+
+    async createManualPlayer(input: {
+        displayName: string;
+        telegramUserId?: number;
+        telegramUsername?: string;
+        aliases?: string[];
+        allowDuplicate?: boolean;
+    }): Promise<Player> {
+        const { displayName, telegramUserId, telegramUsername, aliases = [], allowDuplicate = false } = input;
         const normalizedName = displayName
             .trim()
             .replace(/\s+/g, ' ');
@@ -310,6 +326,10 @@ export class PlayerService {
                 `Player ${exactMatch.displayName} already exists`,
             );
         }
+        if (telegramUserId !== undefined) {
+            if (!Number.isSafeInteger(telegramUserId) || telegramUserId <= 0) throw new Error('Invalid Telegram user ID');
+            if (await this.repositories.players.findByTelegramId(telegramUserId)) throw new Error('Telegram user ID already belongs to another player');
+        }
 
         const now = nowIso();
 
@@ -317,17 +337,19 @@ export class PlayerService {
             id: createId('player'),
 
             displayName: normalizedName,
-
-            aliases: [],
-            isConfirmed: true,
+            telegramUserId,
+            username: telegramUsername?.replace(/^@/, '').trim() || undefined,
+            aliases: [...new Map(aliases.map((alias) => [this.normalizeLookup(alias), this.normalizeName(alias)])).values()].filter((alias) => this.normalizeLookup(alias) !== this.normalizeLookup(normalizedName)),
+            isConfirmed: false,
             isActive: true,
+            source: 'admin',
 
             createdAt: now,
             updatedAt: now,
         };
 
         const saved = await this.repositories.players.save(player);
-        logger.info('player.created', { playerId: saved.id, source: 'admin', confirmed: true });
+        logger.info('player.created', { playerId: saved.id, source: 'admin', confirmed: false });
         return saved;
     }
 
@@ -436,7 +458,18 @@ export class PlayerService {
         return this.serialize(async () => {
             const source = await this.getRequired(sourceId);
             const target = await this.getRequired(targetId);
+            if (source.telegramUserId !== undefined && target.telegramUserId !== undefined && source.telegramUserId !== target.telegramUserId) {
+                throw new Error('Гравці мають різні Telegram ID. Автоматичне обʼєднання заблоковано.');
+            }
             const trainings = await this.repositories.trainings.list();
+
+            for (const training of trainings) {
+                const sourceEntry = [...training.participants, ...training.waitlist].find((entry) => entry.playerId === sourceId);
+                const targetEntry = [...training.participants, ...training.waitlist].find((entry) => entry.playerId === targetId);
+                if (sourceEntry && targetEntry && sourceEntry.status !== targetEntry.status) {
+                    throw new Error(`Не вдалося автоматично обʼєднати записи у тренуванні ${training.title}: один запис основний, інший у листі очікування.`);
+                }
+            }
 
             for (const training of trainings) {
                 const sourceMain = training.participants.find((x) => x.playerId === sourceId);
@@ -447,7 +480,13 @@ export class PlayerService {
 
                 training.participants = training.participants.filter((x) => x.playerId !== sourceId && x.playerId !== targetId);
                 training.waitlist = training.waitlist.filter((x) => x.playerId !== sourceId && x.playerId !== targetId);
-                const chosen = targetMain ?? sourceMain ?? targetWait ?? sourceWait!;
+                const targetEntry = targetMain ?? targetWait;
+                const sourceEntry = sourceMain ?? sourceWait!;
+                const chosen = targetEntry ?? sourceEntry;
+                if (targetEntry) {
+                    chosen.places += sourceEntry.places;
+                    if (chosen.registeredByTelegramUserId !== sourceEntry.registeredByTelegramUserId) chosen.registeredByTelegramUserId = undefined;
+                }
                 chosen.playerId = targetId;
                 chosen.telegramUserId = target.telegramUserId ?? source.telegramUserId;
                 chosen.updatedAt = nowIso();
@@ -458,22 +497,24 @@ export class PlayerService {
                     chosen.status = 'waiting';
                     training.waitlist.push(chosen);
                 }
-                await this.repositories.trainings.save(training);
             }
 
-            const aliases = new Set([...target.aliases, ...source.aliases, source.displayName]);
-            aliases.delete(target.displayName);
-            target.aliases = [...aliases];
+            await this.repositories.trainings.saveAll(trainings);
+
+            const aliases = new Map<string, string>();
+            for (const alias of [...target.aliases, ...source.aliases, source.displayName]) aliases.set(this.normalizeName(alias).toLocaleLowerCase('uk'), alias);
+            aliases.delete(this.normalizeName(target.displayName).toLocaleLowerCase('uk'));
+            target.aliases = [...aliases.values()];
             target.telegramUserId ??= source.telegramUserId;
             target.telegramName ??= source.telegramName;
             target.username ??= source.username;
             target.isConfirmed = target.isConfirmed || source.isConfirmed;
             target.updatedAt = nowIso();
-            await this.repositories.players.save(target);
             source.isActive = false;
             source.aliases = [...new Set([...source.aliases, `merged:${target.id}`])];
             source.updatedAt = nowIso();
-            await this.repositories.players.save(source);
+            const allPlayers = await this.repositories.players.list();
+            await this.repositories.players.saveAll(allPlayers.map((player) => player.id === target.id ? target : player.id === source.id ? source : player));
             logger.info('player.merged', { sourcePlayerId: sourceId, targetPlayerId: targetId });
             return target;
         });
