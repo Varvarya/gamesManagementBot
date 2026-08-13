@@ -46,7 +46,7 @@ test('Telegram preview is club-scoped, additive, explicit and double-confirmatio
     await assert.rejects(() => service.commit(preview.id, 'club-b', 10), /TELEGRAM_IMPORT_SESSION_STALE/);
 
     await assert.rejects(() => service.commit(preview.id, 'club-a', 10), /IMPORT_PLAN_BLOCKED/);
-    const ready = service.skipProblematic(preview.id, 'club-a', 10);
+    const ready = await service.skipProblematic(preview.id, 'club-a', 10);
     assert.equal(ready.canCommit, true);
     const committed = await service.commit(preview.id, 'club-a', 10);
     assert.deepEqual(committed, { created: 1, updated: 0, unchanged: 0 });
@@ -79,7 +79,7 @@ test('blocked Telegram candidates require review, then bulk skip rebuilds readin
     const preview = await service.scan(source('club-a'), 10);
     assert.equal(preview.plan.newCount, 10); assert.equal(preview.possibleDuplicateCount, 2); assert.equal(preview.canCommit, false);
     await assert.rejects(() => service.commit(preview.id, 'club-a', 10), /IMPORT_PLAN_BLOCKED/);
-    const ready = service.skipProblematic(preview.id, 'club-a', 10);
+    const ready = await service.skipProblematic(preview.id, 'club-a', 10);
     assert.equal(ready.skippedCount, 2); assert.equal(ready.canCommit, true);
     assert.deepEqual(await service.commit(preview.id, 'club-a', 10), { created: 10, updated: 0, unchanged: 0 });
 });
@@ -92,9 +92,36 @@ test('bulk skip cannot bypass a hard duplicate identity/name conflict', async ()
     ], contacts: [], partial: false }) }, async () => undefined);
     const preview = await service.scan(source('club-a'), 10);
     assert.equal(preview.plan.conflictCount, 1); assert.equal(preview.canCommit, false);
-    const afterSkip = service.skipProblematic(preview.id, 'club-a', 10);
+    const afterSkip = await service.skipProblematic(preview.id, 'club-a', 10);
     assert.equal(afterSkip.canCommit, false); assert.ok(afterSkip.blockingTypes.includes('AMBIGUOUS_MATCH'));
     await assert.rejects(() => service.commit(preview.id, 'club-a', 10), /IMPORT_PLAN_BLOCKED/);
+});
+
+test('161 new, four ambiguous matches and three review names resolve into a committable rebuilt plan', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'telegram-import-ambiguous-'));
+    const players = new PlayersRepository(path.join(directory, 'players.json')); const now = '2026-01-01T00:00:00.000Z';
+    await players.saveAll(['Alex', 'Sasha', 'Maria', 'Ivan'].flatMap((name, index) => [
+        { id: `${name}-a`, displayName: `${name} Primary`, aliases: [name], isConfirmed: true, isActive: true, source: 'admin' as const, createdAt: now, updatedAt: now },
+        { id: `${name}-b`, displayName: `${name} Secondary`, aliases: [name], isConfirmed: true, isActive: true, source: 'admin' as const, createdAt: now, updatedAt: now },
+    ]));
+    const participants = [
+        ...Array.from({ length: 161 }, (_, index) => ({ telegramUserId: 10_000 + index, firstName: `New Player ${index}` })),
+        ...['Alex', 'Sasha', 'Maria', 'Ivan'].map((firstName, index) => ({ telegramUserId: 20_000 + index, firstName, username: `ambiguous_${index + 1}` })),
+        { telegramUserId: 30_001, firstName: '😈' }, { telegramUserId: 30_002, firstName: '!' }, { telegramUserId: 30_003, firstName: 'X' },
+    ];
+    const service = new TelegramPlayerImportService('club-a', players, { scan: async () => ({ participants, contacts: [], partial: false }) }, async () => undefined);
+    const preview = await service.scan(source('club-a'), 10); assert.equal(preview.plan.newCount, 161); assert.equal(preview.reviewCount, 3); assert.equal(preview.plan.conflictCount, 4); assert.equal(preview.blockedCount, 7);
+    let current = await service.skipProblematic(preview.id, 'club-a', 10); assert.equal(current.blockedCount, 4); assert.deepEqual(current.blockingTypes, ['AMBIGUOUS_MATCH']);
+    const diagnostic: string[] = [];
+    for (const [index, decision] of ['merge', 'create', 'skip', 'merge'].entries()) {
+        const review = await service.getNextAmbiguous(preview.id, 'club-a', 10); assert.ok(review); diagnostic.push(`${review.telegramUsername}:${review.players.map((player) => player.displayName).join('|')}`);
+        if (decision === 'merge') current = await service.resolveAmbiguous(preview.id, 'club-a', 10, review.candidateToken, { type: 'merge_existing', existingPlayerId: review.players[index === 0 ? 0 : 1].id });
+        else if (decision === 'create') current = await service.resolveAmbiguous(preview.id, 'club-a', 10, review.candidateToken, { type: 'create_new' });
+        else current = await service.resolveAmbiguous(preview.id, 'club-a', 10, review.candidateToken, { type: 'skip' });
+    }
+    assert.deepEqual(diagnostic, ['ambiguous_1:Alex Primary|Alex Secondary', 'ambiguous_4:Ivan Primary|Ivan Secondary', 'ambiguous_3:Maria Primary|Maria Secondary', 'ambiguous_2:Sasha Primary|Sasha Secondary']);
+    assert.equal(current.blockedCount, 0); assert.equal(current.canCommit, true);
+    assert.deepEqual(await service.commit(preview.id, 'club-a', 10), { created: 162, updated: 2, unchanged: 0 });
 });
 
 test('connection metadata persists across restart and remains isolated by club', async () => {

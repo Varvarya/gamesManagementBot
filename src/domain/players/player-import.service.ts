@@ -6,6 +6,8 @@ import { logger } from '../../utils/logger';
 
 export type PlayerImportConflict = { type: 'csv_telegram_duplicate' | 'csv_name_duplicate' | 'ambiguous_exact_match'; rows: number[]; message: string; candidatePlayerIds?: string[] };
 export type PlayerImportOperation = { kind: 'create' | 'update' | 'unchanged'; rowNumber: number; player: Player; changes: string[] };
+export type PlayerImportRowResolution = { kind: 'existing'; playerId: string } | { kind: 'create' };
+export type PlayerImportPreviewOptions = { rowResolutions?: Readonly<Record<number, PlayerImportRowResolution>>; skippedRows?: readonly number[] };
 export type PlayerImportPlan = {
     clubId: string; createdAt: string; baseline: string; rowCount: number;
     operations: PlayerImportOperation[]; conflicts: PlayerImportConflict[]; errors: PlayerCsvError[];
@@ -22,16 +24,25 @@ export class PlayerImportService {
         private readonly createBackup: () => Promise<unknown>,
     ) {}
 
-    async preview(csv: string | Buffer): Promise<PlayerImportPlan> {
+    async preview(csv: string | Buffer, options: PlayerImportPreviewOptions = {}): Promise<PlayerImportPlan> {
         logger.info('player_import_started', { clubId: this.clubId });
         const parsed = this.parser.parse(csv);
         logger.info('player_import_parsed', { clubId: this.clubId, rowCount: parsed.rows.length, errorCount: parsed.errors.length });
         const existing = await this.players.list();
-        const conflicts = findCsvConflicts(parsed.rows);
+        const skippedRows = new Set(options.skippedRows ?? []);
+        const conflicts = findCsvConflicts(parsed.rows.filter((row) => !skippedRows.has(row.rowNumber)));
         const blockedRows = new Set(conflicts.flatMap((conflict) => conflict.rows));
         const operations: PlayerImportOperation[] = [];
         for (const row of parsed.rows) {
+            if (skippedRows.has(row.rowNumber)) continue;
             if (blockedRows.has(row.rowNumber)) continue;
+            const resolution = options.rowResolutions?.[row.rowNumber];
+            if (resolution?.kind === 'create') { operations.push({ kind: 'create', rowNumber: row.rowNumber, player: createPlayer(row), changes: ['new'] }); continue; }
+            if (resolution?.kind === 'existing') {
+                const selected = existing.find((player) => player.id === resolution.playerId);
+                if (!selected) { conflicts.push({ type: 'ambiguous_exact_match', rows: [row.rowNumber], message: `Рядок ${row.rowNumber}: вибраного гравця не знайдено` }); continue; }
+                operations.push(mergeExisting(selected, row)); continue;
+            }
             const match = matchPlayer(row, existing);
             if (match.kind === 'ambiguous') {
                 conflicts.push({ type: 'ambiguous_exact_match', rows: [row.rowNumber], candidatePlayerIds: match.players.map((player) => player.id), message: `Рядок ${row.rowNumber}: знайдено кілька гравців із таким імʼям` });
