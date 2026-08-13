@@ -53,6 +53,7 @@ import { ClubDiagnosticsService } from '../domain/clubs/club-diagnostics.service
 import { TelegramUserConnectionManager } from '../domain/telegram-import/telegram-user-connection.manager';
 import { TelegramPlayerImportService } from '../domain/telegram-import/telegram-player-import.service';
 import { TelegramPlayerImportHandler } from '../bot/admin/handlers/telegram-player-import.handler';
+import { TelegramQrAuthService } from '../domain/telegram-import/telegram-qr-auth.service';
 
 
 type ApplicationContextOptions = {
@@ -85,6 +86,7 @@ export class ApplicationContext {
     readonly clubContexts: ClubContextManager;
     readonly registrationSelections = new PendingRegistrationSelectionStore();
     readonly telegramUserConnections: TelegramUserConnectionManager;
+    readonly telegramQrAuth: TelegramQrAuthService;
 
     private readonly superAdminIds: number[];
     private isShuttingDown = false;
@@ -108,6 +110,7 @@ export class ApplicationContext {
         this.clubCreationRequests = new ClubCreationRequestRepository(path.join(options.dataDir, '_system', 'club-creation-requests.json'));
         this.clubContexts = new ClubContextManager(options.dataDir, options.defaultTimezone, this.clubs, this.sessionContexts);
         this.telegramUserConnections = new TelegramUserConnectionManager(options.dataDir);
+        this.telegramQrAuth = new TelegramQrAuthService(this.telegramUserConnections);
         this.clubHealth = new ClubHealthService(this.clubs, options.dataDir, Number(process.env.CLUB_INACTIVE_DAYS ?? 30), this.clubContexts);
         this.navigation = new AdminNavigationService(this.sessionContexts, new AdminUi(this.sessionContexts), new AdminFlowService());
         this.callbackAuthorization = new CallbackAuthorizationService(this.clubs, this.clubCreationRequests, this.superAdminIds, this.sessionContexts);
@@ -379,7 +382,7 @@ export class ApplicationContext {
         const player = new AdminPlayerHandler(services);
         const playerData = new PlayerDataHandler(services, backups);
         const telegramPlayerImports = new TelegramPlayerImportService(context.clubId, repositories.players, this.telegramUserConnections, () => backups.create());
-        const telegramPlayerImport = new TelegramPlayerImportHandler(services, this.telegramUserConnections, telegramPlayerImports, this.superAdminIds);
+        const telegramPlayerImport = new TelegramPlayerImportHandler(services, this.telegramUserConnections, this.telegramQrAuth, telegramPlayerImports, this.superAdminIds);
         const setup = new ClubSetupHandler(services);
         const exceptions = new ScheduleExceptionHandler(services, exceptionReconciliation, templateScheduler, cancellationScheduler);
         const template = new AdminTemplateHandler(services, templateScheduler);

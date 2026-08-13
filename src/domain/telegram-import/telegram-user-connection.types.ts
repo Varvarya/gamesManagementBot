@@ -6,6 +6,7 @@ export type TelegramUserConnection = {
     clubId: string;
     telegramUserId: number;
     displayName: string;
+    username?: string;
     sessionStorageKey: string;
     connectedAt: string;
     lastValidatedAt: string;

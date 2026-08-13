@@ -15,11 +15,13 @@
     "health": "node dist/healthcheck.js",
     "telegram:players-export": "node --import tsx src/tools/telegram-players-export/index.ts",
     "test:club-admin": "node --import tsx --test src/domain/settings/club-admin-authorization.test.ts",
-    "test": "node --import tsx --test src/production-readiness.test.ts src/e2e/production-smoke.test.ts src/e2e/multi-club-context.test.ts src/e2e/zero-club-startup.test.ts src/e2e/current-ux-regressions.test.ts src/e2e/club-open-contract.test.ts src/domain/trainings/human-registration.test.ts src/domain/players/player-data.test.ts src/domain/clubs/club-readiness.test.ts src/domain/schedule-exceptions/schedule-exception.test.ts src/tools/telegram-players-export/telegram-player-export.test.ts src/domain/telegram-import/telegram-player-import.test.ts"
+    "test": "node --import tsx --test src/production-readiness.test.ts src/e2e/production-smoke.test.ts src/e2e/multi-club-context.test.ts src/e2e/zero-club-startup.test.ts src/e2e/current-ux-regressions.test.ts src/e2e/club-open-contract.test.ts src/domain/trainings/human-registration.test.ts src/domain/players/player-data.test.ts src/domain/clubs/club-readiness.test.ts src/domain/schedule-exceptions/schedule-exception.test.ts src/tools/telegram-players-export/telegram-player-export.test.ts src/domain/telegram-import/telegram-player-import.test.ts src/domain/telegram-import/telegram-auth-error.test.ts src/domain/telegram-import/telegram-qr-auth.test.ts"
   },
   "dependencies": {
+    "@types/qrcode": "^1.5.6",
     "dotenv": "^17.4.2",
     "node-schedule": "^2.1.1",
+    "qrcode": "^1.5.4",
     "telegraf": "^4.16.3",
     "teleproto": "^1.228.5"
   },

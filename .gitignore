@@ -16,3 +16,5 @@ yarn-error.log*
 
 .vscode/*
 *.test.ts
+!src/domain/telegram-import/telegram-auth-error.test.ts
+!src/domain/telegram-import/telegram-qr-auth.test.ts

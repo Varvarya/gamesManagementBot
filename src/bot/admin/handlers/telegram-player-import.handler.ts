@@ -2,23 +2,27 @@ import { randomBytes } from 'node:crypto';
 import { Context, Markup } from 'telegraf';
 import { ServicesContext } from '../../../app/services.context';
 import { TelegramPlayerImportService } from '../../../domain/telegram-import/telegram-player-import.service';
-import { TelegramUserConnectionManager, TelegramAuthenticationStage } from '../../../domain/telegram-import/telegram-user-connection.manager';
+import { TelegramUserConnectionManager } from '../../../domain/telegram-import/telegram-user-connection.manager';
+import { TelegramQrAuthError, TelegramQrAuthService, TelegramQrFailureReason } from '../../../domain/telegram-import/telegram-qr-auth.service';
 import { TelegramGroupDialog } from '../../../tools/telegram-players-export/telegram-mtproto-loader';
 import { isClubOwner } from '../../../domain/settings/club-admin-authorization';
 import { AdminCallbacks } from '../callbacks/admin-callbacks';
 import { AdminFlowState } from '../flows/admin-flow.types';
 import { createPlayersKeyboard } from '../keyboards/player.keyboard';
 import { logger } from '../../../utils/logger';
+import { safeTelegramErrorDetails } from '../../../domain/telegram-import/telegram-auth-error';
 
 type DialogSelection = { clubId: string; ownerId: number; createdAt: number; values: Array<{ token: string; dialog: TelegramGroupDialog }> };
 
 export class TelegramPlayerImportHandler {
-    readonly messageStates: readonly AdminFlowState[] = ['waiting_telegram_phone', 'waiting_telegram_code', 'waiting_telegram_password'];
+    readonly messageStates: readonly AdminFlowState[] = ['waiting_telegram_qr_2fa_password'];
     private readonly dialogs = new Map<number, DialogSelection>();
+    private readonly qrAttempts = new Map<number, { id: string; chatId: number; messageId?: number }>();
 
     constructor(
         private readonly services: ServicesContext,
         private readonly connections: TelegramUserConnectionManager,
+        private readonly qrAuth: TelegramQrAuthService,
         private readonly imports: TelegramPlayerImportService,
         private readonly superAdminIds: readonly number[],
     ) {}
@@ -26,6 +30,8 @@ export class TelegramPlayerImportHandler {
     canHandle(callback: string): boolean {
         return callback === AdminCallbacks.PlayerTelegramImport
             || callback === AdminCallbacks.PlayerTelegramConnect
+            || callback.startsWith(AdminCallbacks.PlayerTelegramQrRefreshPrefix)
+            || callback.startsWith(AdminCallbacks.PlayerTelegramQrCancelPrefix)
             || callback === AdminCallbacks.PlayerTelegramConnection
             || callback === AdminCallbacks.PlayerTelegramValidate
             || callback === AdminCallbacks.PlayerTelegramDisconnect
@@ -44,10 +50,10 @@ export class TelegramPlayerImportHandler {
             if (callback === AdminCallbacks.PlayerTelegramImport) return await this.showRoot(ctx);
             if (callback === AdminCallbacks.PlayerTelegramConnect) {
                 if (!this.connections.configured) return await this.showError(ctx, 'Імпорт з Telegram не налаштовано на сервері.');
-                this.services.adminFlow.start(ctx.from.id, 'waiting_telegram_phone');
-                await this.services.adminUi.show(ctx, '🔐 Підключення Telegram\n\nНадішліть номер телефону Telegram-акаунта, який має доступ до чатів клубу.', backKeyboard());
-                return;
+                return await this.startQr(ctx);
             }
+            if (callback.startsWith(AdminCallbacks.PlayerTelegramQrRefreshPrefix)) return await this.refreshQr(ctx, callback.slice(AdminCallbacks.PlayerTelegramQrRefreshPrefix.length));
+            if (callback.startsWith(AdminCallbacks.PlayerTelegramQrCancelPrefix)) return await this.cancelQr(ctx, callback.slice(AdminCallbacks.PlayerTelegramQrCancelPrefix.length));
             if (callback === AdminCallbacks.PlayerTelegramConnection) return await this.showConnection(ctx);
             if (callback === AdminCallbacks.PlayerTelegramValidate) return await this.validate(ctx);
             if (callback === AdminCallbacks.PlayerTelegramDisconnect) return await this.confirmDisconnect(ctx);
@@ -68,42 +74,75 @@ export class TelegramPlayerImportHandler {
 
     async handleMessage(ctx: Context): Promise<boolean> {
         if (!ctx.from || !ctx.message || !this.canHandleMessage(ctx.from.id)) return false;
-        const state = this.services.adminFlow.getState(ctx.from.id);
         if (!('text' in ctx.message)) { await this.services.adminUi.notice(ctx, 'Надішліть текстове значення.'); return true; }
         const value = ctx.message.text.trim();
-        if (state === 'waiting_telegram_code' || state === 'waiting_telegram_password') await this.deleteSensitiveMessage(ctx);
+        await this.deleteSensitiveMessage(ctx);
         try {
-            let stage: TelegramAuthenticationStage;
-            if (state === 'waiting_telegram_phone') stage = await this.connections.beginAuthentication(this.clubId, ctx.from.id, value);
-            else if (state === 'waiting_telegram_code') stage = await this.connections.submitCode(ctx.from.id, value.replace(/\s+/g, ''));
-            else stage = await this.connections.submitPassword(ctx.from.id, value);
-            await this.advanceAuthentication(ctx, stage);
+            const attempt = this.qrAttempts.get(ctx.from.id); if (!attempt) throw new TelegramQrAuthError('QR_TOKEN_EXPIRED', 'password');
+            await this.qrAuth.submitPassword(attempt.id, this.clubId, ctx.from.id, value);
         } catch (error) {
-            logger.warn('telegram_user.connection_failed', { clubId: this.clubId, telegramUserId: ctx.from.id, reason: error instanceof Error ? error.message : String(error) });
-            this.services.adminFlow.finish(ctx.from.id);
-            await this.showError(ctx, friendlyError(error));
+            this.logAuthFailure(ctx.from.id, error);
+            await this.showError(ctx, qrUserMessage(error));
         }
         return true;
     }
 
     private get clubId(): string { return this.services.repositories.clubId; }
 
-    private async advanceAuthentication(ctx: Context, stage: TelegramAuthenticationStage): Promise<void> {
-        const adminId = ctx.from!.id;
-        if (stage === 'code') { this.services.adminFlow.transition(adminId, 'waiting_telegram_code'); await this.services.adminUi.show(ctx, 'Введіть код підтвердження.', backKeyboard()); return; }
-        if (stage === 'password') { this.services.adminFlow.transition(adminId, 'waiting_telegram_password'); await this.services.adminUi.show(ctx, 'Введіть пароль двоетапної перевірки.', backKeyboard()); return; }
-        if (stage === 'completed') {
-            const connection = await this.connections.completeAuthentication(adminId);
-            this.services.adminFlow.finish(adminId);
-            await this.services.adminUi.show(ctx, `✅ Telegram підключено\n\nАкаунт:\n${connection.displayName}\n\nТепер можна імпортувати учасників доступних цьому акаунту чатів.`, Markup.inlineKeyboard([[Markup.button.callback('💬 Обрати чат', AdminCallbacks.PlayerTelegramAddSource)], [Markup.button.callback('◀️ Назад', AdminCallbacks.PlayerTelegramImport)]]));
-            return;
-        }
-        if (stage === 'failed') throw new Error('TELEGRAM_AUTHENTICATION_FAILED');
+    private async startQr(ctx: Context): Promise<void> {
+        const adminId = ctx.from!.id; const chatId = ctx.chat!.id;
+        const presentation = await this.qrAuth.startQrLogin(this.clubId, adminId, this.qrEvents(ctx, adminId, chatId));
+        if (ctx.callbackQuery) await ctx.deleteMessage().catch(() => undefined);
+        const message = await ctx.replyWithPhoto({ source: presentation.png }, { caption: qrCaption(), ...qrKeyboard(presentation.id) });
+        this.qrAttempts.set(adminId, { id: presentation.id, chatId, messageId: message.message_id });
+        this.services.adminUi.trackBotMessage(adminId, chatId, message.message_id);
     }
+
+    private async refreshQr(ctx: Context, attemptId: string): Promise<void> {
+        const adminId = ctx.from!.id; const current = this.qrAttempts.get(adminId);
+        if (!current || current.id !== attemptId) return this.showStaleQr(ctx);
+        const presentation = await this.qrAuth.refreshQrLogin(attemptId, this.clubId, adminId, this.qrEvents(ctx, adminId, current.chatId));
+        if (current.messageId) await ctx.telegram.deleteMessage(current.chatId, current.messageId).catch(() => undefined);
+        const message = await ctx.telegram.sendPhoto(current.chatId, { source: presentation.png }, { caption: qrCaption(), ...qrKeyboard(presentation.id) });
+        this.qrAttempts.set(adminId, { id: presentation.id, chatId: current.chatId, messageId: message.message_id });
+        this.services.adminUi.trackBotMessage(adminId, current.chatId, message.message_id);
+    }
+
+    private async cancelQr(ctx: Context, attemptId: string): Promise<void> {
+        const current = this.qrAttempts.get(ctx.from!.id); if (!current || current.id !== attemptId) return this.showStaleQr(ctx);
+        await this.qrAuth.cancel(attemptId, this.clubId, ctx.from!.id, false); this.qrAttempts.delete(ctx.from!.id); this.services.adminFlow.finish(ctx.from!.id);
+        if (current.messageId) await ctx.telegram.deleteMessage(current.chatId, current.messageId).catch(() => undefined);
+        await ctx.telegram.sendMessage(current.chatId, 'Підключення скасовано.', Markup.inlineKeyboard([[Markup.button.callback('◀️ Назад', AdminCallbacks.PlayerTelegramImport)]]));
+    }
+
+    private qrEvents(ctx: Context, adminId: number, chatId: number) {
+        return {
+            onQr: async (presentation: { id: string; png: Buffer }) => {
+                const current = this.qrAttempts.get(adminId); if (!current || current.id !== presentation.id || !current.messageId) return;
+                await ctx.telegram.editMessageMedia(chatId, current.messageId, undefined, { type: 'photo', media: { source: presentation.png }, caption: qrCaption() }, qrKeyboard(presentation.id)).catch(() => undefined);
+            },
+            onPasswordRequired: async (attemptId: string) => {
+                const current = this.qrAttempts.get(adminId); if (!current || current.id !== attemptId) return;
+                this.services.adminFlow.start(adminId, 'waiting_telegram_qr_2fa_password');
+                await ctx.telegram.sendMessage(chatId, '🔐 Для цього акаунта увімкнено двоетапну перевірку.\n\nНадішліть пароль.');
+            },
+            onPasswordInvalid: async (attemptId: string) => { const current = this.qrAttempts.get(adminId); if (!current || current.id !== attemptId) return; await ctx.telegram.sendMessage(chatId, '❌ Невірний пароль двоетапної перевірки.\n\nНадішліть пароль ще раз або скасуйте підключення.', Markup.inlineKeyboard([[Markup.button.callback('❌ Скасувати', `${AdminCallbacks.PlayerTelegramQrCancelPrefix}${attemptId}`)]])); },
+            onCompleted: async (attemptId: string, connection: { displayName: string; username?: string }) => {
+                const current = this.qrAttempts.get(adminId); if (!current || current.id !== attemptId) return;
+                this.qrAttempts.delete(adminId); this.services.adminFlow.finish(adminId); if (current.messageId) await ctx.telegram.deleteMessage(chatId, current.messageId).catch(() => undefined);
+                await ctx.telegram.sendMessage(chatId, ['✅ Telegram підключено', '', connection.displayName, connection.username ? `@${connection.username}` : ''].filter(Boolean).join('\n'), Markup.inlineKeyboard([[Markup.button.callback('💬 Обрати чат', AdminCallbacks.PlayerTelegramAddSource)], [Markup.button.callback('◀️ Назад', AdminCallbacks.PlayerTelegramImport)]]));
+            },
+            onExpired: async (attemptId: string) => { const current = this.qrAttempts.get(adminId); if (!current || current.id !== attemptId) return; await ctx.telegram.editMessageCaption(chatId, current.messageId, undefined, '⌛ QR-код більше неактуальний.', Markup.inlineKeyboard([[Markup.button.callback('🔄 Створити новий QR', `${AdminCallbacks.PlayerTelegramQrRefreshPrefix}${attemptId}`)], [Markup.button.callback('❌ Скасувати', `${AdminCallbacks.PlayerTelegramQrCancelPrefix}${attemptId}`)]])).catch(() => undefined); },
+            onFailed: async (attemptId: string, reason: TelegramQrFailureReason) => { const current = this.qrAttempts.get(adminId); if (!current || current.id !== attemptId) return; await ctx.telegram.editMessageCaption(chatId, current.messageId, undefined, `⚠️ ${qrReasonMessage(reason)}`, Markup.inlineKeyboard([[Markup.button.callback('🔄 Створити новий QR', `${AdminCallbacks.PlayerTelegramQrRefreshPrefix}${attemptId}`)], [Markup.button.callback('❌ Скасувати', `${AdminCallbacks.PlayerTelegramQrCancelPrefix}${attemptId}`)]])).catch(() => undefined); },
+        };
+    }
+
+    private async showStaleQr(ctx: Context): Promise<void> { await this.services.adminUi.show(ctx, '⚠️ Цей QR-код уже неактуальний.', Markup.inlineKeyboard([[Markup.button.callback('🔄 Створити новий', AdminCallbacks.PlayerTelegramConnect)], [Markup.button.callback('◀️ Назад', AdminCallbacks.PlayerTelegramImport)]])); }
 
     private async showRoot(ctx: Context): Promise<void> {
         if (this.messageStates.includes(this.services.adminFlow.getState(ctx.from!.id))) {
-            await this.connections.cancelAuthentication(ctx.from!.id);
+            const attempt = this.qrAttempts.get(ctx.from!.id); if (attempt) await this.qrAuth.cancel(attempt.id, this.clubId, ctx.from!.id, false).catch(() => undefined);
+            this.qrAttempts.delete(ctx.from!.id);
             this.services.adminFlow.finish(ctx.from!.id);
         }
         const connection = await this.connections.getConnection(this.clubId);
@@ -131,6 +170,7 @@ export class TelegramPlayerImportHandler {
         await this.services.adminUi.show(ctx, `🔗 Telegram\n\nПідключено:\n${connection.displayName}\n\nСтатус: ${status}`, Markup.inlineKeyboard([
             ...(connection.telegramUserId === ctx.from!.id ? [[Markup.button.callback('💬 Обрати чат', AdminCallbacks.PlayerTelegramAddSource)]] : []),
             [Markup.button.callback('🔄 Перевірити підключення', AdminCallbacks.PlayerTelegramValidate)],
+            [Markup.button.callback('🔄 Перепідключити', AdminCallbacks.PlayerTelegramConnect)],
             ...(await this.canDisconnect(ctx.from!.id) ? [[Markup.button.callback('🔌 Відключити', AdminCallbacks.PlayerTelegramDisconnect)]] : []),
             [Markup.button.callback('◀️ Назад', AdminCallbacks.PlayerTelegramImport)],
         ]));
@@ -182,9 +222,14 @@ export class TelegramPlayerImportHandler {
     private async canDisconnect(userId: number): Promise<boolean> { const settings = await this.services.repositories.settings.get(); return this.superAdminIds.includes(userId) || isClubOwner(settings.admins, userId) || (await this.connections.getConnection(this.clubId))?.telegramUserId === userId; }
     private async deleteSensitiveMessage(ctx: Context): Promise<void> { if (!ctx.message || !ctx.chat) return; await ctx.telegram.deleteMessage(ctx.chat.id, ctx.message.message_id).catch(() => undefined); }
     private async showError(ctx: Context, message: string): Promise<void> { await this.services.adminUi.show(ctx, `⚠️ ${message}`, Markup.inlineKeyboard([[Markup.button.callback('◀️ Назад', AdminCallbacks.PlayerTelegramImport)]])); }
+    private logAuthFailure(telegramUserId: number, error: unknown): void { const original = safeTelegramErrorDetails(error); logger.error('telegram_qr_auth.failed', { clubId: this.clubId, requestedByTelegramUserId: telegramUserId, stage: error instanceof TelegramQrAuthError ? error.stage : this.services.adminFlow.getState(telegramUserId), reason: error instanceof TelegramQrAuthError ? error.reason : 'UNKNOWN', errorName: original.name, errorMessage: original.message, errorCode: original.code, rpcErrorMessage: original.errorMessage, stack: original.stack }); }
 }
 
 function backKeyboard() { return Markup.inlineKeyboard([[Markup.button.callback('❌ Скасувати', AdminCallbacks.PlayerTelegramImport)]]); }
+function qrCaption(): string { return '🔐 Підключення Telegram\n\n1. Відкрийте Telegram на телефоні.\n2. Відскануйте QR-код для входу.\n3. Підтвердьте підключення.\n\nQR діє обмежений час.'; }
+function qrKeyboard(id: string) { return Markup.inlineKeyboard([[Markup.button.callback('🔄 Оновити QR', `${AdminCallbacks.PlayerTelegramQrRefreshPrefix}${id}`)], [Markup.button.callback('❌ Скасувати', `${AdminCallbacks.PlayerTelegramQrCancelPrefix}${id}`)]]); }
+function qrUserMessage(error: unknown): string { return error instanceof TelegramQrAuthError ? qrReasonMessage(error.reason) : 'Не вдалося підключити Telegram. Деталі записано в лог.'; }
+function qrReasonMessage(reason: TelegramQrFailureReason): string { switch (reason) { case 'QR_TOKEN_EXPIRED': return 'QR-код більше неактуальний.'; case 'AUTH_ACCOUNT_MISMATCH': return 'Підключено інший Telegram-акаунт. Для безпеки підключіть акаунт, з якого ви зараз користуєтесь ботом.'; case 'PASSWORD_INVALID': return 'Невірний пароль двоетапної перевірки.'; case 'FLOOD_WAIT': return 'Telegram тимчасово обмежив спроби. Спробуйте пізніше.'; case 'NETWORK_ERROR': return 'Не вдалося звʼязатися з Telegram. Спробуйте ще раз.'; case 'SESSION_ENCRYPTION_FAILED': case 'SESSION_PERSIST_FAILED': return 'Telegram авторизовано, але не вдалося безпечно зберегти підключення.'; default: return 'Не вдалося підключити Telegram. Деталі записано в лог.'; } }
 function friendlyError(error: unknown): string {
     const message = error instanceof Error ? error.message : String(error);
     if (message === 'AUTHENTICATED_ACCOUNT_MISMATCH') return 'Підключений акаунт має належати адміністратору, який виконує підключення.';

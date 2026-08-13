@@ -90,6 +90,8 @@ export const AdminCallbacks = {
     PlayerDuplicates: 'pd',
     PlayerTelegramImport: 'pt',
     PlayerTelegramConnect: 'pt:c',
+    PlayerTelegramQrRefreshPrefix: 'tqr:r:',
+    PlayerTelegramQrCancelPrefix: 'tqr:c:',
     PlayerTelegramConnection: 'pt:cfg',
     PlayerTelegramValidate: 'pt:val',
     PlayerTelegramDisconnect: 'pt:disc',
