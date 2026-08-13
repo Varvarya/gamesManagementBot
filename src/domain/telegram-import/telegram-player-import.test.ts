@@ -59,7 +59,7 @@ test('Telegram preview is club-scoped, additive, explicit and double-confirmatio
     assert.deepEqual(imported.aliases, ['Папаня']);
     assert.equal(imported.isConfirmed, true);
 
-    assert.deepEqual(await service.commit(preview.id, 'club-a', 10), { created: 0, updated: 0, unchanged: 1 });
+    await assert.rejects(() => service.commit(preview.id, 'club-a', 10), /IMPORT_ALREADY_COMPLETED/);
     assert.equal((await players.list()).length, 2);
     assert.equal(backupCount, 1);
 });
@@ -137,4 +137,26 @@ test('connection metadata persists across restart and remains isolated by club',
     assert.deepEqual((await afterRestart.listByClub('club-b')).map((item) => item.telegramUserId), [20]);
     const persisted = await fs.readFile(file, 'utf8');
     assert.equal(persisted.includes('secret-session-token'), false);
+});
+
+test('possible duplicate and suspicious-name review decisions rebuild one canonical plan', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'telegram-import-soft-review-')); const players = new PlayersRepository(path.join(directory, 'players.json')); const now = '2026-01-01T00:00:00.000Z';
+    await players.saveAll([{ id: 'alex', displayName: 'Alex', aliases: [], isConfirmed: true, isActive: true, source: 'admin', createdAt: now, updatedAt: now }]);
+    const service = new TelegramPlayerImportService('club-a', players, { scan: async () => ({ participants: [{ telegramUserId: 11, firstName: 'Alex' }, { telegramUserId: 12, firstName: '😈', username: 'devil' }], contacts: [], partial: false }) }, async () => undefined);
+    const preview = await service.scan(source('club-a'), 10); assert.deepEqual(preview.blockingTypes, ['POSSIBLE_DUPLICATE', 'NEEDS_REVIEW']);
+    const duplicate = await service.getNextReview(preview.id, 'club-a', 10); assert.equal(duplicate?.type, 'POSSIBLE_DUPLICATE'); assert.equal(duplicate?.players[0].id, 'alex');
+    await service.resolveReview(preview.id, 'club-a', 10, duplicate!.candidateToken, { type: 'merge_existing', existingPlayerId: 'alex' });
+    const suspicious = await service.getNextReview(preview.id, 'club-a', 10); assert.equal(suspicious?.type, 'NEEDS_REVIEW');
+    const ready = await service.resolveReview(preview.id, 'club-a', 10, suspicious!.candidateToken, { type: 'rename_and_create', displayName: 'Олексій' });
+    assert.equal(ready.state, 'ready'); assert.equal(ready.canCommit, true); assert.equal(ready.plan.updateCount, 1); assert.equal(ready.plan.newCount, 1);
+    assert.deepEqual(await service.commit(preview.id, 'club-a', 10), { created: 1, updated: 1, unchanged: 0 });
+    assert.equal((await players.list()).some((player) => player.displayName === 'Олексій' && player.telegramUserId === 12), true);
+});
+
+test('review sessions are isolated by requesting user and club and cancelled callbacks become stale', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'telegram-import-scope-')); const players = new PlayersRepository(path.join(directory, 'players.json'));
+    const service = new TelegramPlayerImportService('club-a', players, { scan: async () => ({ participants: [{ telegramUserId: 1, firstName: '😈' }], contacts: [], partial: false }) }, async () => undefined);
+    const preview = await service.scan(source('club-a'), 10);
+    assert.throws(() => service.get(preview.id, 'club-a', 11), /TELEGRAM_IMPORT_SESSION_STALE/); assert.throws(() => service.get(preview.id, 'club-b', 10), /TELEGRAM_IMPORT_SESSION_STALE/);
+    service.cancel(preview.id, 'club-a', 10); assert.throws(() => service.get(preview.id, 'club-a', 10), /STALE_CALLBACK/);
 });

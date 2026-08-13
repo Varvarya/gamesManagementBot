@@ -105,7 +105,9 @@ export const AdminCallbacks = {
     PlayerTelegramAmbiguousMergePrefix: 'tir:m:',
     PlayerTelegramAmbiguousCreatePrefix: 'tir:n:',
     PlayerTelegramAmbiguousSkipPrefix: 'tir:s:',
+    PlayerTelegramRenamePrefix: 'tir:r:',
     PlayerTelegramImportCancelPrefix: 'pt:x:',
+    PlayerTelegramImportCancelConfirmPrefix: 'tir:x:',
 
     CreatePlayer: 'p:c',
     ConfirmCreatePlayer: 'p:cc',
