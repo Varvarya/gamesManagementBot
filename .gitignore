@@ -9,6 +9,8 @@
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+.telegram-session
+/exports/
 /.pnp
 .pnp.js
 
@@ -22,3 +24,4 @@ yarn-error.log*
 !src/e2e/club-open-contract.test.ts
 !src/domain/trainings/human-registration.test.ts
 !src/domain/players/player-data.test.ts
+!src/tools/telegram-players-export/telegram-player-export.test.ts

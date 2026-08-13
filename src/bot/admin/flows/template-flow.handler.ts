@@ -133,7 +133,7 @@ export class TemplateFlowHandler {
             const mode = this.getMode(adminId);
             this.services.adminFlow.transition(adminId, mode === 'edit' ? 'waiting_template_edit_input' : 'waiting_template_quick_input');
             await this.logSessionDebug(adminId, 'template_back');
-            await this.services.adminUi.show(ctx, [mode === 'edit' ? '✏️ Редагування шаблону' : '➕ Новий шаблон', '', 'Надішліть виправлені дані ще раз. Попередньо введені дані збережено.'].join('\n'), createFlowCancelKeyboard(mode === 'edit' ? AdminCallbacks.CancelEditTemplate : AdminCallbacks.CancelCreateTemplate));
+            await this.services.adminUi.show(ctx, [mode === 'edit' ? '✏️ Редагування розкладу' : '➕ Новий запис розкладу', '', 'Надішліть виправлені дані ще раз. Попередньо введені дані збережено.'].join('\n'), createFlowCancelKeyboard(mode === 'edit' ? AdminCallbacks.CancelEditTemplate : AdminCallbacks.CancelCreateTemplate));
             return;
         }
 
@@ -325,7 +325,7 @@ export class TemplateFlowHandler {
         await this.services.adminUi.show(
             ctx,
             [
-                '➕ Новий шаблон',
+                '➕ Новий запис розкладу',
                 '',
                 'Надішліть дані одним повідомленням',
                 '',
@@ -364,7 +364,7 @@ export class TemplateFlowHandler {
         if (!template.slots.length) {
             await this.services.adminUi.replaceWithError(
                 ctx,
-                'У шаблоні немає слотів для редагування.',
+                'У цьому записі розкладу не налаштовано дні та час.',
                 createFlowCancelKeyboard(
                     `${AdminCallbacks.TemplatePrefix}${template.id}`,
                 ),
@@ -386,7 +386,7 @@ export class TemplateFlowHandler {
         await this.services.adminUi.show(
             ctx,
             [
-                '✏️ Редагування шаблону',
+                `✏️ ${template.title}`,
                 '',
                 'Скопіюйте блок нижче, змініть потрібні дані та надішліть його',
                 '',
@@ -426,7 +426,7 @@ export class TemplateFlowHandler {
         if (!data.pendingTemplate) {
             await this.services.adminUi.replaceWithError(
                 ctx,
-                'Дані шаблону не знайдені. Почніть створення ще раз.',
+                'Дані розкладу не знайдені. Почніть створення ще раз.',
                 this.createBackToScheduleKeyboard(),
             );
 
@@ -439,7 +439,7 @@ export class TemplateFlowHandler {
         if (chatId === undefined) {
             await this.services.adminUi.replaceWithError(
                 ctx,
-                'Оберіть чат для шаблону.',
+                'Оберіть чат для публікації.',
                 createTemplatePreviewKeyboard('create'),
             );
 
@@ -471,7 +471,7 @@ export class TemplateFlowHandler {
                 enabled: true,
             });
         } catch (error) {
-            await this.services.adminUi.replaceWithError(ctx, `${error instanceof Error ? error.message : 'Не вдалося створити шаблон.'}\n\nВиправте дані або виберіть інший чат.`, createTemplatePreviewKeyboard('create'));
+            await this.services.adminUi.replaceWithError(ctx, `${error instanceof Error ? error.message : 'Не вдалося створити запис розкладу.'}\n\nВиправте дані або виберіть інший чат.`, createTemplatePreviewKeyboard('create'));
             return;
         }
 
@@ -481,7 +481,7 @@ export class TemplateFlowHandler {
 
         await this.services.adminUi.replaceWithSuccess(
             ctx,
-            `Шаблон створено.\n\n${renderTemplateCard(template)}`,
+            renderTemplateCard(template),
             createTemplateKeyboard(
                 template,
             ),
@@ -503,7 +503,7 @@ export class TemplateFlowHandler {
         ) {
             await this.services.adminUi.replaceWithError(
                 ctx,
-                'Дані для редагування не знайдені. Відкрийте шаблон і спробуйте ще раз.',
+                'Дані для редагування не знайдені. Відкрийте запис розкладу і спробуйте ще раз.',
                 this.createBackToScheduleKeyboard(),
             );
 
@@ -516,7 +516,7 @@ export class TemplateFlowHandler {
         if (chatId === undefined) {
             await this.services.adminUi.replaceWithError(
                 ctx,
-                'Оберіть чат для шаблону.',
+                'Оберіть чат для публікації.',
                 createTemplatePreviewKeyboard('edit'),
             );
             return;
@@ -545,7 +545,7 @@ export class TemplateFlowHandler {
             );
             template = await this.services.templates.getRequired(template.id);
         } catch (error) {
-            await this.services.adminUi.replaceWithError(ctx, `${error instanceof Error ? error.message : 'Не вдалося оновити шаблон.'}\n\nВиправте дані або виберіть інший чат.`, createTemplatePreviewKeyboard('edit'));
+            await this.services.adminUi.replaceWithError(ctx, `${error instanceof Error ? error.message : 'Не вдалося оновити розклад.'}\n\nВиправте дані або виберіть інший чат.`, createTemplatePreviewKeyboard('edit'));
             return;
         }
 
@@ -559,7 +559,7 @@ export class TemplateFlowHandler {
 
         await this.services.adminUi.replaceWithSuccess(
             ctx,
-            `Зміни шаблону збережено.\n\n${renderTemplateCard(template)}`,
+            renderTemplateCard(template),
             createTemplateKeyboard(
                 template,
             ),
@@ -580,7 +580,7 @@ export class TemplateFlowHandler {
                 [
                     'Немає жодного увімкненого чату.',
                     '',
-                    'Додайте або увімкніть чат у розділі «💬 Чати», потім поверніться до цього шаблону.',
+                    'Додайте або увімкніть чат у розділі «💬 Чати», потім поверніться до розкладу.',
                 ].join('\n'),
                 createNoTemplateChatsKeyboard(
                     mode,
@@ -728,8 +728,8 @@ export class TemplateFlowHandler {
         await this.services.adminUi.show(
             ctx,
             mode === 'edit'
-                ? '✏️ Надішліть оновлені дані шаблону ще раз.'
-                : '➕ Надішліть дані нового шаблону ще раз.',
+                ? '✏️ Надішліть оновлені дані розкладу ще раз.'
+                : '➕ Надішліть дані нового запису розкладу ще раз.',
             createFlowCancelKeyboard(
                 mode === 'edit'
                     ? AdminCallbacks.CancelEditTemplate
@@ -1168,7 +1168,7 @@ export class TemplateFlowHandler {
         if (
             !template.slots.length
         ) {
-            return 'У шаблоні немає слотів';
+            return 'У розкладі не налаштовано дні та час';
         }
 
         return [

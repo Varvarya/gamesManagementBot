@@ -18,3 +18,15 @@ Start directly with `npm run start:prod`, or use `docker compose up -d --build`.
 Common startup errors are missing/invalid environment variables, unwritable data volumes, invalid JSON without a usable backup, an invalid timezone, or a Telegram token rejected by BotFather. Registration-message deletion requires group delete permissions; failure is logged and does not break registration.
 
 Import/export remains restricted to configured super-admin IDs. Never commit `.env`, data, backups, or bot tokens.
+
+## Local Telegram group player export
+
+The local exporter uses a Telegram **user account** over MTProto; it does not start the bot and never reads or writes club storage. Create Telegram developer application credentials, then set `TELEGRAM_API_ID` and `TELEGRAM_API_HASH`. `TELEGRAM_SESSION` is optional.
+
+1. Run `npm run telegram:players-export`.
+2. On the first run, enter the phone number, login code, and 2FA password when requested.
+3. Choose a visible group or supergroup (`0` cancels safely).
+4. Review the generated files under `exports/`.
+5. Upload the CSV through **Club Admin → Гравці → Імпорт** and review its import preview.
+
+The reusable session string is saved to the ignored `.telegram-session` file with owner-only permissions. Phone numbers, login codes, passwords, API hash, and session contents are never printed. For repeatable selection, `--chat-id <id>` and `--chat-title <title>` are supported. Telegram may restrict full member enumeration; a partial result is explicitly marked in the CLI summary and raw JSON.
