@@ -39,6 +39,8 @@ export class TelegramPlayerImportHandler {
             || callback.startsWith(AdminCallbacks.PlayerTelegramSourcePrefix)
             || callback.startsWith(AdminCallbacks.PlayerTelegramImportConfirmPrefix)
             || callback.startsWith(AdminCallbacks.PlayerTelegramReviewPrefix)
+            || callback.startsWith(AdminCallbacks.PlayerTelegramAmbiguousOpenPrefix)
+            || callback.startsWith(AdminCallbacks.PlayerTelegramOverviewPrefix)
             || callback.startsWith(AdminCallbacks.PlayerTelegramSkipBlockedPrefix)
             || callback.startsWith(AdminCallbacks.PlayerTelegramAmbiguousMergePrefix)
             || callback.startsWith(AdminCallbacks.PlayerTelegramAmbiguousCreatePrefix)
@@ -65,7 +67,9 @@ export class TelegramPlayerImportHandler {
             if (callback === AdminCallbacks.PlayerTelegramAddSource) return await this.showSourcePicker(ctx);
             if (callback.startsWith(AdminCallbacks.PlayerTelegramSourcePrefix)) return await this.scan(ctx, callback.slice(AdminCallbacks.PlayerTelegramSourcePrefix.length));
             if (callback.startsWith(AdminCallbacks.PlayerTelegramImportConfirmPrefix)) return await this.commit(ctx, callback.slice(AdminCallbacks.PlayerTelegramImportConfirmPrefix.length));
-            if (callback.startsWith(AdminCallbacks.PlayerTelegramReviewPrefix)) return await this.review(ctx, callback.slice(AdminCallbacks.PlayerTelegramReviewPrefix.length));
+            if (callback.startsWith(AdminCallbacks.PlayerTelegramAmbiguousOpenPrefix)) return await this.openNextAmbiguous(ctx, callback.slice(AdminCallbacks.PlayerTelegramAmbiguousOpenPrefix.length));
+            if (callback.startsWith(AdminCallbacks.PlayerTelegramOverviewPrefix)) return await this.renderPreview(ctx, this.imports.get(callback.slice(AdminCallbacks.PlayerTelegramOverviewPrefix.length), this.clubId, ctx.from.id));
+            if (callback.startsWith(AdminCallbacks.PlayerTelegramReviewPrefix)) return await this.openNextAmbiguous(ctx, callback.slice(AdminCallbacks.PlayerTelegramReviewPrefix.length));
             if (callback.startsWith(AdminCallbacks.PlayerTelegramSkipBlockedPrefix)) return await this.skipProblematic(ctx, callback.slice(AdminCallbacks.PlayerTelegramSkipBlockedPrefix.length));
             if (callback.startsWith(AdminCallbacks.PlayerTelegramImportCancelPrefix)) return await this.cancel(ctx, callback.slice(AdminCallbacks.PlayerTelegramImportCancelPrefix.length));
         } catch (error) {
@@ -250,25 +254,19 @@ export class TelegramPlayerImportHandler {
         const warning = session.partial ? '\n⚠️ Telegram не надав повний список учасників цього чату.' : '';
         const ambiguousCount = session.plan.conflicts.filter((conflict) => conflict.type === 'ambiguous_exact_match').length;
         const blocked = session.blockedCount ? `\n⚠️ Потребують перевірки: ${session.blockedCount}` : '';
-        await this.services.adminUi.show(ctx, [`💬 ${title}`, '', `Учасників: ${session.candidates.length}`, '', `➕ Нових: ${session.plan.newCount}`, `✅ Уже є: ${session.existingCount + session.plan.unchangedCount}`, `🔄 Оновлень: ${session.plan.updateCount}`, `❌ Помилок: ${session.plan.errorCount}`, ambiguousCount ? `⚠️ Неоднозначні збіги: ${ambiguousCount}` : '', blocked, warning].filter(Boolean).join('\n'), Markup.inlineKeyboard([
+        await this.services.adminUi.show(ctx, [`💬 ${title}`, '', `Учасників: ${session.candidates.length}`, '', `➕ Нових: ${session.plan.newCount}`, `✅ Уже є: ${session.existingCount + session.plan.unchangedCount}`, `🔄 Оновлень: ${session.plan.updateCount}`, `❌ Помилок: ${session.plan.errorCount}`, ambiguousCount ? `⚠️ Неоднозначні збіги: ${ambiguousCount}` : '', blocked, session.canCommit ? '\n✅ Готово до імпорту' : '', warning].filter(Boolean).join('\n'), Markup.inlineKeyboard([
             ...(session.canCommit ? [[Markup.button.callback('✅ Імпортувати', `${AdminCallbacks.PlayerTelegramImportConfirmPrefix}${session.id}`)]] : [
-                [Markup.button.callback(ambiguousCount ? `⚠️ Перевірити збіги (${ambiguousCount})` : '⚠️ Перевірити', `${AdminCallbacks.PlayerTelegramReviewPrefix}${session.id}`)],
+                [Markup.button.callback(ambiguousCount ? `⚠️ Перевірити збіги (${ambiguousCount})` : '⚠️ Перевірити', ambiguousCount ? `${AdminCallbacks.PlayerTelegramAmbiguousOpenPrefix}${session.id}` : `${AdminCallbacks.PlayerTelegramReviewPrefix}${session.id}`)],
                 ...(session.possibleDuplicateCount + session.reviewCount ? [[Markup.button.callback('⏭ Пропустити проблемні', `${AdminCallbacks.PlayerTelegramSkipBlockedPrefix}${session.id}`)]] : []),
             ]),
             [Markup.button.callback('❌ Скасувати', `${AdminCallbacks.PlayerTelegramImportCancelPrefix}${session.id}`)],
         ]));
     }
-    private async review(ctx: Context, id: string): Promise<void> {
-        if (id.endsWith(':back')) { const session = this.imports.get(id.slice(0, -5), this.clubId, ctx.from!.id); await this.renderPreview(ctx, session); return; }
+    private async openNextAmbiguous(ctx: Context, id: string): Promise<void> {
         const session = this.imports.get(id, this.clubId, ctx.from!.id);
         const ambiguous = await this.imports.getNextAmbiguous(id, this.clubId, ctx.from!.id);
         if (ambiguous) { await this.renderAmbiguous(ctx, id, ambiguous); return; }
-        const labels = session.blockingTypes.map(blockingLabel);
-        await this.services.adminUi.show(ctx, ['⚠️ Потрібна перевірка', '', `Невирішених: ${session.blockedCount}`, ...labels.map((label) => `• ${label}`), '', 'Проблемні записи не буде імпортовано без рішення.'].join('\n'), Markup.inlineKeyboard([
-            ...(session.possibleDuplicateCount + session.reviewCount ? [[Markup.button.callback('⏭ Пропустити проблемні', `${AdminCallbacks.PlayerTelegramSkipBlockedPrefix}${id}`)]] : []),
-            [Markup.button.callback('◀️ До перегляду', `${AdminCallbacks.PlayerTelegramReviewPrefix}${id}:back`)],
-            [Markup.button.callback('❌ Скасувати', `${AdminCallbacks.PlayerTelegramImportCancelPrefix}${id}`)],
-        ]));
+        await this.renderPreview(ctx, session);
     }
     private async renderAmbiguous(ctx: Context, sessionId: string, review: Awaited<ReturnType<TelegramPlayerImportService['getNextAmbiguous']>> & {}): Promise<void> {
         await this.services.adminUi.show(ctx, ['⚠️ Неоднозначний збіг', '', `Перевірка ${review.position}/${review.total}`, '', 'Telegram:', review.telegramUsername ? `@${review.telegramUsername}` : review.telegramDisplayName, '', 'Знайдено декілька гравців:', ...review.players.map((player, index) => `${index + 1}. ${player.displayName}`)].join('\n'), createAmbiguousReviewKeyboard(sessionId, review));
@@ -338,7 +336,7 @@ export function createAmbiguousReviewKeyboard(sessionId: string, review: NonNull
         ...review.players.map((player, index) => [Markup.button.callback(`${index + 1}. ${player.displayName}`, `${AdminCallbacks.PlayerTelegramAmbiguousMergePrefix}${sessionId}:${review.candidateToken}:${player.token}`)]),
         [Markup.button.callback('➕ Створити нового', `${AdminCallbacks.PlayerTelegramAmbiguousCreatePrefix}${sessionId}:${review.candidateToken}`)],
         [Markup.button.callback('⏭ Пропустити', `${AdminCallbacks.PlayerTelegramAmbiguousSkipPrefix}${sessionId}:${review.candidateToken}`)],
-        [Markup.button.callback('◀️ Назад', `${AdminCallbacks.PlayerTelegramReviewPrefix}${sessionId}:back`)],
+        [Markup.button.callback('◀️ До огляду', `${AdminCallbacks.PlayerTelegramOverviewPrefix}${sessionId}`)],
     ]);
 }
 
