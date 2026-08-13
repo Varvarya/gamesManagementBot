@@ -1,7 +1,7 @@
 import { randomInt } from 'node:crypto';
 import { Context, Markup } from 'telegraf';
 import { ServicesContext } from '../../../app/services.context';
-import { getImportUiState, safePlanSummary, TelegramPlayerImportService, TelegramPlayerImportSession } from '../../../domain/telegram-import/telegram-player-import.service';
+import { findNextUnresolvedCandidate, getImportUiState, safePlanSummary, TelegramPlayerImportService, TelegramPlayerImportSession } from '../../../domain/telegram-import/telegram-player-import.service';
 import { TelegramUserConnectionManager } from '../../../domain/telegram-import/telegram-user-connection.manager';
 import { TelegramQrAuthError, TelegramQrAuthService, TelegramQrFailureReason } from '../../../domain/telegram-import/telegram-qr-auth.service';
 import { isClubOwner } from '../../../domain/settings/club-admin-authorization';
@@ -264,8 +264,10 @@ export class TelegramPlayerImportHandler {
         const ambiguousCount = session.plan.conflicts.filter((conflict) => conflict.type === 'ambiguous_exact_match').length;
         const blocked = session.blockedCount ? `\n⚠️ Потребують перевірки: ${session.blockedCount}` : '';
         const hasWork = session.plan.newCount + session.plan.updateCount > 0;
+        const ui = getImportUiState(session); const nextReview = findNextUnresolvedCandidate(session);
+        if (session.state === 'reviewing' && session.blockedCount > 0 && nextReview && !ui.availableActions.includes('review')) { logger.error('telegram_import.ui_invariant_failed', { clubId: this.clubId, importSessionId: session.id, lifecycle: session.state, availableActions: ui.availableActions, nextReviewCandidateType: nextReview.type, ...safePlanSummary(session) }); throw new Error('TELEGRAM_IMPORT_UI_INVARIANT'); }
         await this.services.adminUi.show(ctx, [`💬 ${title}`, '', `Учасників Telegram: ${session.candidates.length}`, '', `➕ Нових: ${session.plan.newCount}`, `✅ Уже є: ${session.existingCount + session.plan.unchangedCount}`, `🔄 Оновлень: ${session.plan.updateCount}`, `⏭ Пропущено: ${session.skippedCount}`, `⚠️ На перевірці: ${session.blockedCount}`, `❌ Помилок: ${session.plan.errorCount}`, ambiguousCount ? `⚠️ Неоднозначні збіги: ${ambiguousCount}` : '', blocked, session.canCommit && hasWork ? '\n✅ Готово до імпорту' : session.canCommit ? '\n✅ Усі учасники вже є у списку гравців.' : '', warning].filter(Boolean).join('\n'), createTelegramImportPreviewKeyboard(session, ambiguousCount));
-        logger.info('telegram_import.preview_rendered', { clubId: this.clubId, importSessionId: session.id, lifecycle: session.state, ...safePlanSummary(session) });
+        logger.info('telegram_import.preview_rendered', { clubId: this.clubId, importSessionId: session.id, lifecycle: session.state, availableActions: ui.availableActions, nextReviewCandidateType: nextReview?.type, nextReviewCandidateToken: nextReview?.candidateToken, ...safePlanSummary(session) });
     }
     private async showImportOverview(ctx: Context, id: string): Promise<void> { this.nameReviews.delete(ctx.from!.id); this.services.adminFlow.finish(ctx.from!.id); await this.renderPreview(ctx, this.imports.get(id, this.clubId, ctx.from!.id)); }
     private async openNextAmbiguous(ctx: Context, id: string): Promise<void> {

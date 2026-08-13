@@ -79,9 +79,9 @@ export class TelegramPlayerImportService {
         return structuredClone(updated);
     }
     async getNextReview(id: string, clubId: string, requestedBy: number): Promise<TelegramReviewItem | undefined> {
-        const session = this.get(id, clubId, requestedBy); const ambiguous = await this.getNextAmbiguous(id, clubId, requestedBy);
-        if (ambiguous) return { ...ambiguous, type: 'AMBIGUOUS_MATCH', remaining: session.blockedCount };
-        const source = session.reviewCandidates.find((item) => item.type === 'POSSIBLE_DUPLICATE' && !session.decisions[item.token]) ?? session.reviewCandidates.find((item) => !session.decisions[item.token]); if (!source) return undefined;
+        const session = this.get(id, clubId, requestedBy); const descriptor = findNextUnresolvedCandidate(session); if (!descriptor) return undefined;
+        if (descriptor.type === 'AMBIGUOUS_MATCH') { const ambiguous = await this.getNextAmbiguous(id, clubId, requestedBy); return ambiguous ? { ...ambiguous, type: descriptor.type, remaining: session.blockedCount } : undefined; }
+        const source = session.reviewCandidates.find((item) => item.token === descriptor.candidateToken); if (!source) return undefined;
         const players = await this.players.list(); const choices = source.candidatePlayerIds.flatMap((playerId) => { const player = players.find((value) => value.id === playerId); return player ? [{ token: playerToken(player.id), id: player.id, displayName: player.displayName }] : []; });
         return { type: source.type, candidateToken: source.token, position: Object.keys(session.decisions).length + 1, total: Object.keys(session.decisions).length + session.blockedCount, remaining: session.blockedCount, telegramUsername: source.candidate.telegramUsername, telegramDisplayName: source.candidate.telegramDisplayName, suggestedDisplayName: source.candidate.suggestedDisplayName, players: choices };
     }
@@ -94,12 +94,12 @@ export class TelegramPlayerImportService {
         logger.info('telegram_import.review_updated', { clubId, importSessionId: id, candidateToken, decisionType: decision.type, remainingBlockedCount: rebuilt.blockedCount, blockingTypes: rebuilt.blockingTypes, canCommit: rebuilt.canCommit }); return structuredClone(rebuilt);
     }
     async getNextAmbiguous(id: string, clubId: string, requestedBy: number): Promise<TelegramAmbiguousReview | undefined> {
-        const session = this.get(id, clubId, requestedBy); const conflicts = ambiguousConflicts(session.plan);
-        if (!conflicts.length) return undefined;
-        const conflict = conflicts[0]; const row = conflict.rows[0]; const item = session.importCandidates[row - 2];
-        if (!item) throw new Error('TELEGRAM_IMPORT_REVIEW_STALE');
+        const session = this.get(id, clubId, requestedBy); const descriptor = findNextUnresolvedCandidate(session); if (!descriptor || descriptor.type !== 'AMBIGUOUS_MATCH') return undefined;
+        const conflict = session.plan.conflicts[descriptor.conflictIndex!]; const item = session.importCandidates.find((value) => value.token === descriptor.candidateToken);
+        if (!conflict || !item) throw new Error('TELEGRAM_IMPORT_REVIEW_STALE');
         const players = await this.players.list(); const choices = (conflict.candidatePlayerIds ?? []).flatMap((playerId) => { const player = players.find((value) => value.id === playerId); return player ? [{ token: playerToken(player.id), id: player.id, displayName: player.displayName }] : []; });
-        return { candidateToken: item.token, position: resolvedAmbiguousCount(session) + 1, total: resolvedAmbiguousCount(session) + conflicts.length, telegramUsername: item.candidate.telegramUsername, telegramDisplayName: item.candidate.telegramDisplayName, suggestedDisplayName: item.candidate.suggestedDisplayName, players: choices };
+        const unresolved = unresolvedPlanConflictCandidates(session);
+        return { candidateToken: item.token, position: resolvedAmbiguousCount(session) + 1, total: resolvedAmbiguousCount(session) + unresolved.length, telegramUsername: item.candidate.telegramUsername, telegramDisplayName: item.candidate.telegramDisplayName, suggestedDisplayName: item.candidate.suggestedDisplayName, players: choices };
     }
     async resolveAmbiguous(id: string, clubId: string, requestedBy: number, candidateToken: string, decision: TelegramImportDecision): Promise<TelegramPlayerImportSession> {
         const session = this.get(id, clubId, requestedBy); const item = session.importCandidates.find((value) => value.token === candidateToken); if (!item) throw new Error('TELEGRAM_IMPORT_REVIEW_STALE');
@@ -130,6 +130,23 @@ export class TelegramPlayerImportService {
 }
 
 function ambiguousConflicts(plan: PlayerImportPlan) { return plan.conflicts.filter((conflict) => conflict.type === 'ambiguous_exact_match' && conflict.candidatePlayerIds?.length); }
+type ReviewCandidateDescriptor = { type: 'AMBIGUOUS_MATCH' | 'POSSIBLE_DUPLICATE' | 'NEEDS_REVIEW'; candidateToken: string; conflictIndex?: number };
+function unresolvedPlanConflictCandidates(session: TelegramPlayerImportSession): ReviewCandidateDescriptor[] {
+    const result: ReviewCandidateDescriptor[] = [];
+    session.plan.conflicts.forEach((conflict, conflictIndex) => {
+        for (const row of conflict.rows) {
+            const item = session.importCandidates?.[row - 2];
+            if (item && !session.decisions[item.token]) result.push({ type: 'AMBIGUOUS_MATCH', candidateToken: item.token, conflictIndex });
+        }
+    });
+    return result;
+}
+export function findNextUnresolvedCandidate(session: TelegramPlayerImportSession): ReviewCandidateDescriptor | undefined {
+    const conflict = unresolvedPlanConflictCandidates(session)[0]; if (conflict) return conflict;
+    const source = session.reviewCandidates?.filter((item) => !session.decisions[item.token]).sort((a, b) => reviewPriority(a.type) - reviewPriority(b.type))[0];
+    return source ? { type: source.type, candidateToken: source.token } : undefined;
+}
+function reviewPriority(type: TelegramReviewSource['type']): number { return type === 'POSSIBLE_DUPLICATE' ? 1 : 2; }
 function resolvedAmbiguousCount(session: TelegramPlayerImportSession): number { return Object.values(session.decisions).length; }
 function token(): string { return randomBytes(6).toString('base64url'); }
 function playerToken(playerId: string): string { return createHash('sha256').update(playerId).digest('base64url').slice(0, 10); }
@@ -155,7 +172,7 @@ export function safePlanSummary(session: TelegramPlayerImportSession) {
 export type TelegramImportUiState = { lifecycle: TelegramPlayerImportSession['state']; canCommit: boolean; hasWork: boolean; unresolvedCount: number; skippableCount: number; availableActions: Array<'review' | 'skip_problematic' | 'commit' | 'cancel'> };
 export function getImportUiState(session: TelegramPlayerImportSession): TelegramImportUiState {
     const hasWork = session.plan.newCount + session.plan.updateCount > 0; const skippableCount = session.possibleDuplicateCount + session.reviewCount; const actions: TelegramImportUiState['availableActions'] = [];
-    const resolvableCount = skippableCount + ambiguousConflicts(session.plan).length;
-    if (resolvableCount > 0) actions.push('review'); if (skippableCount > 0) actions.push('skip_problematic'); if (session.canCommit && hasWork && session.state === 'ready') actions.push('commit'); actions.push('cancel');
+    const nextReviewCandidate = findNextUnresolvedCandidate(session);
+    if (session.blockedCount > 0 && nextReviewCandidate) actions.push('review'); if (skippableCount > 0) actions.push('skip_problematic'); if (session.canCommit && hasWork && session.state === 'ready') actions.push('commit'); actions.push('cancel');
     return { lifecycle: session.state, canCommit: session.canCommit, hasWork, unresolvedCount: session.blockedCount, skippableCount, availableActions: actions };
 }
