@@ -40,6 +40,7 @@ export const ADMIN_FLOW_STATES = [
     'player_import_conflicts',
     'player_import_ready',
     'waiting_telegram_qr_2fa_password',
+    'waiting_telegram_import_source',
     'waiting_exception_date',
     'waiting_exception_value',
     'waiting_exception_extra',

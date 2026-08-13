@@ -10,6 +10,7 @@ export type PlayerImportPlan = {
     clubId: string; createdAt: string; baseline: string; rowCount: number;
     operations: PlayerImportOperation[]; conflicts: PlayerImportConflict[]; errors: PlayerCsvError[];
     newCount: number; updateCount: number; unchangedCount: number; conflictCount: number; errorCount: number;
+    blockedCount: number; canCommit: boolean;
 };
 
 export class PlayerImportService {
@@ -145,12 +146,13 @@ function mergeExisting(existing: Player, row: PlayerCsvRow): PlayerImportOperati
     return { kind: changes.length ? 'update' : 'unchanged', rowNumber: row.rowNumber, player, changes: [...new Set(changes)] };
 }
 
-function summarize(base: Omit<PlayerImportPlan, 'newCount' | 'updateCount' | 'unchangedCount' | 'conflictCount' | 'errorCount'>): PlayerImportPlan {
+function summarize(base: Omit<PlayerImportPlan, 'newCount' | 'updateCount' | 'unchangedCount' | 'conflictCount' | 'errorCount' | 'blockedCount' | 'canCommit'>): PlayerImportPlan {
+    const conflictCount = base.conflicts.length; const errorCount = base.errors.length;
     return { ...base,
         newCount: base.operations.filter((item) => item.kind === 'create').length,
         updateCount: base.operations.filter((item) => item.kind === 'update').length,
         unchangedCount: base.operations.filter((item) => item.kind === 'unchanged').length,
-        conflictCount: base.conflicts.length, errorCount: base.errors.length };
+        conflictCount, errorCount, blockedCount: conflictCount + errorCount, canCommit: conflictCount === 0 && errorCount === 0 };
 }
 
 function fingerprint(players: Player[]): string { return JSON.stringify(players.map((player) => [player.id, player.updatedAt]).sort()); }

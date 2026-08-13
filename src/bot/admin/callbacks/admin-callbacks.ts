@@ -97,10 +97,10 @@ export const AdminCallbacks = {
     PlayerTelegramDisconnect: 'pt:disc',
     PlayerTelegramDisconnectConfirm: 'pt:disc:ok',
     PlayerTelegramAddSource: 'pt:add',
-    PlayerTelegramDialogPrefix: 'pt:d:',
-    PlayerTelegramDialogPagePrefix: 'pt:dp:',
     PlayerTelegramSourcePrefix: 'pt:s:',
     PlayerTelegramImportConfirmPrefix: 'pt:ok:',
+    PlayerTelegramReviewPrefix: 'pt:rv:',
+    PlayerTelegramSkipBlockedPrefix: 'pt:sk:',
     PlayerTelegramImportCancelPrefix: 'pt:x:',
 
     CreatePlayer: 'p:c',

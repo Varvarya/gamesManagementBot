@@ -1,10 +1,9 @@
-import { randomBytes } from 'node:crypto';
+import { randomInt } from 'node:crypto';
 import { Context, Markup } from 'telegraf';
 import { ServicesContext } from '../../../app/services.context';
-import { TelegramPlayerImportService } from '../../../domain/telegram-import/telegram-player-import.service';
+import { safePlanSummary, TelegramPlayerImportService, TelegramPlayerImportSession } from '../../../domain/telegram-import/telegram-player-import.service';
 import { TelegramUserConnectionManager } from '../../../domain/telegram-import/telegram-user-connection.manager';
 import { TelegramQrAuthError, TelegramQrAuthService, TelegramQrFailureReason } from '../../../domain/telegram-import/telegram-qr-auth.service';
-import { TelegramGroupDialog } from '../../../tools/telegram-players-export/telegram-mtproto-loader';
 import { isClubOwner } from '../../../domain/settings/club-admin-authorization';
 import { AdminCallbacks } from '../callbacks/admin-callbacks';
 import { AdminFlowState } from '../flows/admin-flow.types';
@@ -12,11 +11,11 @@ import { createPlayersKeyboard } from '../keyboards/player.keyboard';
 import { logger } from '../../../utils/logger';
 import { safeTelegramErrorDetails } from '../../../domain/telegram-import/telegram-auth-error';
 
-type DialogSelection = { clubId: string; ownerId: number; createdAt: number; values: Array<{ token: string; dialog: TelegramGroupDialog }> };
+type SourceSelection = { clubId: string; requestId: number; createdAt: number };
 
 export class TelegramPlayerImportHandler {
-    readonly messageStates: readonly AdminFlowState[] = ['waiting_telegram_qr_2fa_password'];
-    private readonly dialogs = new Map<number, DialogSelection>();
+    readonly messageStates: readonly AdminFlowState[] = ['waiting_telegram_qr_2fa_password', 'waiting_telegram_import_source'];
+    private readonly sourceSelections = new Map<number, SourceSelection>();
     private readonly qrAttempts = new Map<number, { id: string; chatId: number; messageId?: number }>();
 
     constructor(
@@ -37,10 +36,10 @@ export class TelegramPlayerImportHandler {
             || callback === AdminCallbacks.PlayerTelegramDisconnect
             || callback === AdminCallbacks.PlayerTelegramDisconnectConfirm
             || callback === AdminCallbacks.PlayerTelegramAddSource
-            || callback.startsWith(AdminCallbacks.PlayerTelegramDialogPrefix)
-            || callback.startsWith(AdminCallbacks.PlayerTelegramDialogPagePrefix)
             || callback.startsWith(AdminCallbacks.PlayerTelegramSourcePrefix)
             || callback.startsWith(AdminCallbacks.PlayerTelegramImportConfirmPrefix)
+            || callback.startsWith(AdminCallbacks.PlayerTelegramReviewPrefix)
+            || callback.startsWith(AdminCallbacks.PlayerTelegramSkipBlockedPrefix)
             || callback.startsWith(AdminCallbacks.PlayerTelegramImportCancelPrefix);
     }
 
@@ -58,11 +57,11 @@ export class TelegramPlayerImportHandler {
             if (callback === AdminCallbacks.PlayerTelegramValidate) return await this.validate(ctx);
             if (callback === AdminCallbacks.PlayerTelegramDisconnect) return await this.confirmDisconnect(ctx);
             if (callback === AdminCallbacks.PlayerTelegramDisconnectConfirm) return await this.disconnect(ctx);
-            if (callback === AdminCallbacks.PlayerTelegramAddSource) return await this.browseDialogs(ctx, 0, true);
-            if (callback.startsWith(AdminCallbacks.PlayerTelegramDialogPagePrefix)) return await this.browseDialogs(ctx, Number(callback.slice(AdminCallbacks.PlayerTelegramDialogPagePrefix.length)), false);
-            if (callback.startsWith(AdminCallbacks.PlayerTelegramDialogPrefix)) return await this.selectDialog(ctx, callback.slice(AdminCallbacks.PlayerTelegramDialogPrefix.length));
+            if (callback === AdminCallbacks.PlayerTelegramAddSource) return await this.showSourcePicker(ctx);
             if (callback.startsWith(AdminCallbacks.PlayerTelegramSourcePrefix)) return await this.scan(ctx, callback.slice(AdminCallbacks.PlayerTelegramSourcePrefix.length));
             if (callback.startsWith(AdminCallbacks.PlayerTelegramImportConfirmPrefix)) return await this.commit(ctx, callback.slice(AdminCallbacks.PlayerTelegramImportConfirmPrefix.length));
+            if (callback.startsWith(AdminCallbacks.PlayerTelegramReviewPrefix)) return await this.review(ctx, callback.slice(AdminCallbacks.PlayerTelegramReviewPrefix.length));
+            if (callback.startsWith(AdminCallbacks.PlayerTelegramSkipBlockedPrefix)) return await this.skipProblematic(ctx, callback.slice(AdminCallbacks.PlayerTelegramSkipBlockedPrefix.length));
             if (callback.startsWith(AdminCallbacks.PlayerTelegramImportCancelPrefix)) return await this.cancel(ctx, callback.slice(AdminCallbacks.PlayerTelegramImportCancelPrefix.length));
         } catch (error) {
             logger.error('telegram_import.ui_failed', { clubId: this.clubId, telegramUserId: ctx.from.id, error });
@@ -74,9 +73,10 @@ export class TelegramPlayerImportHandler {
 
     async handleMessage(ctx: Context): Promise<boolean> {
         if (!ctx.from || !ctx.message || !this.canHandleMessage(ctx.from.id)) return false;
+        const state = this.services.adminFlow.getState(ctx.from.id);
+        if (state === 'waiting_telegram_import_source') return this.handleSourceMessage(ctx);
         if (!('text' in ctx.message)) { await this.services.adminUi.notice(ctx, 'Надішліть текстове значення.'); return true; }
-        const value = ctx.message.text.trim();
-        await this.deleteSensitiveMessage(ctx);
+        const value = ctx.message.text.trim(); await this.deleteSensitiveMessage(ctx);
         try {
             const attempt = this.qrAttempts.get(ctx.from.id); if (!attempt) throw new TelegramQrAuthError('QR_TOKEN_EXPIRED', 'password');
             await this.qrAuth.submitPassword(attempt.id, this.clubId, ctx.from.id, value);
@@ -140,9 +140,13 @@ export class TelegramPlayerImportHandler {
     private async showStaleQr(ctx: Context): Promise<void> { await this.services.adminUi.show(ctx, '⚠️ Цей QR-код уже неактуальний.', Markup.inlineKeyboard([[Markup.button.callback('🔄 Створити новий', AdminCallbacks.PlayerTelegramConnect)], [Markup.button.callback('◀️ Назад', AdminCallbacks.PlayerTelegramImport)]])); }
 
     private async showRoot(ctx: Context): Promise<void> {
-        if (this.messageStates.includes(this.services.adminFlow.getState(ctx.from!.id))) {
+        const activeState = this.services.adminFlow.getState(ctx.from!.id);
+        if (activeState === 'waiting_telegram_qr_2fa_password') {
             const attempt = this.qrAttempts.get(ctx.from!.id); if (attempt) await this.qrAuth.cancel(attempt.id, this.clubId, ctx.from!.id, false).catch(() => undefined);
             this.qrAttempts.delete(ctx.from!.id);
+            this.services.adminFlow.finish(ctx.from!.id);
+        } else if (activeState === 'waiting_telegram_import_source') {
+            this.sourceSelections.delete(ctx.from!.id);
             this.services.adminFlow.finish(ctx.from!.id);
         }
         const connection = await this.connections.getConnection(this.clubId);
@@ -155,9 +159,9 @@ export class TelegramPlayerImportHandler {
         }
         const sources = await this.connections.getSources(this.clubId);
         const owner = connection.telegramUserId === ctx.from!.id;
-        await this.services.adminUi.show(ctx, ['💬 Імпорт з Telegram', '', ...(sources.length ? ['Оберіть чат:'] : ['Чатів для імпорту ще немає.']), connection.status === 'reauth_required' ? '\n⚠️ Підключення потребує повторної авторизації.' : ''].filter(Boolean).join('\n'), Markup.inlineKeyboard([
+        await this.services.adminUi.show(ctx, ['💬 Імпорт з Telegram', '', ...(sources.length ? ['Збережені чати:', ...sources.map((source) => `• ${source.title}`)] : ['Чатів для імпорту ще немає.']), connection.status === 'reauth_required' ? '\n⚠️ Підключення потребує повторної авторизації.' : ''].filter(Boolean).join('\n'), Markup.inlineKeyboard([
             ...sources.map((source) => [Markup.button.callback(source.title, `${AdminCallbacks.PlayerTelegramSourcePrefix}${source.shortId}`)]),
-            ...(owner ? [[Markup.button.callback('➕ Додати чат', AdminCallbacks.PlayerTelegramAddSource)]] : []),
+            ...(owner ? [[Markup.button.callback('➕ Обрати інший чат', AdminCallbacks.PlayerTelegramAddSource)]] : []),
             [Markup.button.callback('⚙️ Підключення', AdminCallbacks.PlayerTelegramConnection)],
             [Markup.button.callback('◀️ Назад', AdminCallbacks.Players)],
         ]));
@@ -176,48 +180,95 @@ export class TelegramPlayerImportHandler {
         ]));
     }
 
+    private async showSourcePicker(ctx: Context): Promise<void> {
+        const adminId = ctx.from!.id; const connection = await this.connections.getConnection(this.clubId);
+        if (!connection || connection.telegramUserId !== adminId) throw new Error('CONNECTION_PRIVACY_DENIED');
+        const requestId = randomInt(1, 2_147_483_647);
+        this.sourceSelections.set(adminId, { clubId: this.clubId, requestId, createdAt: Date.now() });
+        this.services.adminFlow.start(adminId, 'waiting_telegram_import_source');
+        if (ctx.callbackQuery) await ctx.deleteMessage().catch(() => undefined);
+        const message = await ctx.reply('💬 Оберіть групу\n\nНатисніть кнопку нижче та виберіть потрібний чат.\n\nТакож можна переслати повідомлення з групи або надіслати посилання t.me.', createTelegramSourcePickerKeyboard(requestId));
+        this.services.adminUi.trackBotMessage(adminId, ctx.chat!.id, message.message_id);
+    }
+
+    private async handleSourceMessage(ctx: Context): Promise<boolean> {
+        const message = ctx.message;
+        if (!message) return false;
+        const adminId = ctx.from!.id; const selection = this.sourceSelections.get(adminId);
+        if (!selection || selection.clubId !== this.clubId || Date.now() - selection.createdAt > 10 * 60_000) {
+            this.sourceSelections.delete(adminId); this.services.adminFlow.finish(adminId);
+            await this.removeSourceKeyboard(ctx, '⚠️ Вибір чату вже неактуальний. Відкрийте його знову.'); return true;
+        }
+        try {
+            const shared = extractTelegramSourceSelector(message, selection.requestId);
+            if (shared.kind === 'selected') { await this.acceptSource(ctx, shared.selector); return true; }
+            if (shared.kind === 'wrong_request') { await ctx.reply('⚠️ Цей вибір групи належить іншому запиту. Натисніть «Обрати групу» ще раз.'); return true; }
+            if (shared.kind === 'hidden_forward') { await ctx.reply('Не вдалося визначити групу з пересланого повідомлення. Скористайтеся кнопкою «💬 Обрати групу».'); return true; }
+            if ('text' in message) {
+                const text = message.text.trim();
+                if (text === '❌ Скасувати') { this.sourceSelections.delete(adminId); this.services.adminFlow.finish(adminId); await this.removeSourceKeyboard(ctx, 'Вибір чату скасовано.'); await this.showRoot(ctx); return true; }
+                if (text === '↪️ Переслати повідомлення') { await ctx.reply('Перешліть сюди будь-яке повідомлення з потрібної групи.'); return true; }
+                if (text === '🔗 Надіслати посилання') { await ctx.reply('Надішліть посилання на групу або повідомлення у форматі t.me/…'); return true; }
+                const selector = parseTelegramChatLink(text); if (selector) { await this.acceptSource(ctx, selector); return true; }
+                await ctx.reply('Надішліть посилання t.me/…, перешліть повідомлення або скористайтеся кнопкою «💬 Обрати групу».'); return true;
+            }
+            await ctx.reply('Не вдалося визначити групу. Скористайтеся кнопкою «💬 Обрати групу».');
+        } catch (error) {
+            if (error instanceof Error && error.message === 'TELEGRAM_SELECTED_GROUP_INACCESSIBLE') await ctx.reply('⚠️ Підключений Telegram-акаунт не має доступу до цієї групи. Оберіть іншу групу.');
+            else throw error;
+        }
+        return true;
+    }
+
+    private async acceptSource(ctx: Context, selector: { chatId?: string; username?: string }): Promise<void> {
+        const connection = await this.connections.getConnection(this.clubId); if (!connection) throw new Error('TELEGRAM_CONNECTION_NOT_FOUND');
+        const group = await this.connections.resolveAccessibleGroup(connection, ctx.from!.id, selector);
+        await this.connections.addSource(this.clubId, connection, group, ctx.from!.id);
+        this.sourceSelections.delete(ctx.from!.id); this.services.adminFlow.finish(ctx.from!.id);
+        await this.removeSourceKeyboard(ctx, `✅ Додано чат «${group.title}».`); await this.showRoot(ctx);
+    }
+
+    private async removeSourceKeyboard(ctx: Context, text: string): Promise<void> { await ctx.reply(text, Markup.removeKeyboard()); }
+
     private async validate(ctx: Context): Promise<void> { const connection = await this.connections.getConnection(this.clubId); if (!connection) return this.showRoot(ctx); await this.connections.validate(connection.id); await this.showConnection(ctx); }
     private async confirmDisconnect(ctx: Context): Promise<void> { if (!await this.canDisconnect(ctx.from!.id)) throw new Error('CONNECTION_PRIVACY_DENIED'); await this.services.adminUi.show(ctx, '🔌 Відключити Telegram від клубу?', Markup.inlineKeyboard([[Markup.button.callback('🔌 Відключити', AdminCallbacks.PlayerTelegramDisconnectConfirm)], [Markup.button.callback('❌ Скасувати', AdminCallbacks.PlayerTelegramConnection)]])); }
-    private async disconnect(ctx: Context): Promise<void> { const connection = await this.connections.getConnection(this.clubId); if (!connection) return this.showRoot(ctx); if (!await this.canDisconnect(ctx.from!.id)) throw new Error('CONNECTION_PRIVACY_DENIED'); await this.connections.disconnect(connection.id, this.clubId); this.dialogs.delete(ctx.from!.id); await this.showRoot(ctx); }
-
-    private async browseDialogs(ctx: Context, page: number, refresh: boolean): Promise<void> {
-        const adminId = ctx.from!.id;
-        const connection = await this.connections.getConnection(this.clubId);
-        if (!connection || connection.telegramUserId !== adminId) throw new Error('CONNECTION_PRIVACY_DENIED');
-        let selection = this.dialogs.get(adminId);
-        if (refresh || !selection || selection.clubId !== this.clubId || Date.now() - selection.createdAt > 10 * 60_000) {
-            const dialogs = await this.connections.listDialogs(connection, adminId);
-            selection = { clubId: this.clubId, ownerId: adminId, createdAt: Date.now(), values: dialogs.map((dialog) => ({ token: randomBytes(4).toString('base64url'), dialog })) };
-            this.dialogs.set(adminId, selection);
-        }
-        const size = 8; const pages = Math.max(1, Math.ceil(selection.values.length / size)); const current = Math.max(0, Math.min(page, pages - 1));
-        const items = selection.values.slice(current * size, (current + 1) * size);
-        await this.services.adminUi.show(ctx, `Оберіть групу · ${current + 1}/${pages}\n\nПоказано лише групи, доступні вашому Telegram-акаунту.`, Markup.inlineKeyboard([
-            ...items.map((item) => [Markup.button.callback(item.dialog.title, `${AdminCallbacks.PlayerTelegramDialogPrefix}${item.token}`)]),
-            [...(current > 0 ? [Markup.button.callback('⬅️', `${AdminCallbacks.PlayerTelegramDialogPagePrefix}${current - 1}`)] : []), ...(current + 1 < pages ? [Markup.button.callback('➡️', `${AdminCallbacks.PlayerTelegramDialogPagePrefix}${current + 1}`)] : [])],
-            [Markup.button.callback('◀️ Назад', AdminCallbacks.PlayerTelegramImport)],
-        ].filter((row) => row.length)));
-    }
-
-    private async selectDialog(ctx: Context, token: string): Promise<void> {
-        const selection = this.dialogs.get(ctx.from!.id); const item = selection?.values.find((value) => value.token === token);
-        if (!selection || selection.clubId !== this.clubId || selection.ownerId !== ctx.from!.id || !item) throw new Error('TELEGRAM_DIALOG_SELECTION_STALE');
-        const connection = await this.connections.getConnection(this.clubId); if (!connection) throw new Error('TELEGRAM_CONNECTION_NOT_FOUND');
-        await this.connections.addSource(this.clubId, connection, item.dialog, ctx.from!.id); this.dialogs.delete(ctx.from!.id); await this.showRoot(ctx);
-    }
+    private async disconnect(ctx: Context): Promise<void> { const connection = await this.connections.getConnection(this.clubId); if (!connection) return this.showRoot(ctx); if (!await this.canDisconnect(ctx.from!.id)) throw new Error('CONNECTION_PRIVACY_DENIED'); await this.connections.disconnect(connection.id, this.clubId); this.sourceSelections.delete(ctx.from!.id); await this.showRoot(ctx); }
 
     private async scan(ctx: Context, shortId: string): Promise<void> {
         const source = await this.connections.getSourceByShortId(this.clubId, shortId); if (!source) throw new Error('TELEGRAM_IMPORT_SOURCE_UNAVAILABLE');
         await this.services.adminUi.show(ctx, `💬 ${source.title}\n\nОтримуємо учасників…`, Markup.inlineKeyboard([[Markup.button.callback('❌ Скасувати', AdminCallbacks.PlayerTelegramImport)]]));
         const session = await this.imports.scan(source, ctx.from!.id);
-        const warning = session.partial ? '\n\n⚠️ Telegram не надав повний список учасників цього чату.' : '';
-        await this.services.adminUi.show(ctx, [`💬 ${source.title}`, '', `Учасників: ${session.candidates.length}`, '', `✅ Уже в клубі: ${session.existingCount}`, `➕ Нових: ${session.plan.newCount}`, `⚠️ Можливих дублів: ${session.possibleDuplicateCount}`, `✏️ Перевірити імʼя: ${session.reviewCount}`, `🤖 Пропущено: ${session.skippedCount}`, warning].join('\n'), Markup.inlineKeyboard([
-            ...(session.plan.newCount ? [[Markup.button.callback('✅ Імпортувати готових', `${AdminCallbacks.PlayerTelegramImportConfirmPrefix}${session.id}`)]] : []),
+        await this.renderPreview(ctx, session, source.title);
+    }
+
+    private async renderPreview(ctx: Context, session: TelegramPlayerImportSession, title = 'Telegram'): Promise<void> {
+        const warning = session.partial ? '\n⚠️ Telegram не надав повний список учасників цього чату.' : '';
+        const blocked = session.blockedCount ? `\n⚠️ Потребують перевірки: ${session.blockedCount}` : '';
+        await this.services.adminUi.show(ctx, [`💬 ${title}`, '', `Учасників: ${session.candidates.length}`, '', `➕ Нових: ${session.plan.newCount}`, `✅ Уже є: ${session.existingCount + session.plan.unchangedCount}`, `🔄 Оновлень: ${session.plan.updateCount}`, `❌ Помилок: ${session.plan.errorCount}`, blocked, warning].filter(Boolean).join('\n'), Markup.inlineKeyboard([
+            ...(session.canCommit ? [[Markup.button.callback('✅ Імпортувати', `${AdminCallbacks.PlayerTelegramImportConfirmPrefix}${session.id}`)]] : [
+                [Markup.button.callback('⚠️ Перевірити', `${AdminCallbacks.PlayerTelegramReviewPrefix}${session.id}`)],
+                ...(session.possibleDuplicateCount + session.reviewCount ? [[Markup.button.callback('⏭ Пропустити проблемні', `${AdminCallbacks.PlayerTelegramSkipBlockedPrefix}${session.id}`)]] : []),
+            ]),
             [Markup.button.callback('❌ Скасувати', `${AdminCallbacks.PlayerTelegramImportCancelPrefix}${session.id}`)],
         ]));
     }
-
-    private async commit(ctx: Context, id: string): Promise<void> { const result = await this.imports.commit(id, this.clubId, ctx.from!.id); const players = await this.services.repositories.players.list(); await this.services.adminUi.show(ctx, `✅ Імпорт завершено\n\nНових: ${result.created}\nОновлено: ${result.updated}\nБез змін: ${result.unchanged}`, createPlayersKeyboard(players.filter((player) => !player.isConfirmed && player.isActive).length)); }
+    private async review(ctx: Context, id: string): Promise<void> {
+        if (id.endsWith(':back')) { const session = this.imports.get(id.slice(0, -5), this.clubId, ctx.from!.id); await this.renderPreview(ctx, session); return; }
+        const session = this.imports.get(id, this.clubId, ctx.from!.id);
+        const labels = session.blockingTypes.map(blockingLabel);
+        await this.services.adminUi.show(ctx, ['⚠️ Потрібна перевірка', '', `Невирішених: ${session.blockedCount}`, ...labels.map((label) => `• ${label}`), '', 'Проблемні записи не буде імпортовано без рішення.'].join('\n'), Markup.inlineKeyboard([
+            ...(session.possibleDuplicateCount + session.reviewCount ? [[Markup.button.callback('⏭ Пропустити проблемні', `${AdminCallbacks.PlayerTelegramSkipBlockedPrefix}${id}`)]] : []),
+            [Markup.button.callback('◀️ До перегляду', `${AdminCallbacks.PlayerTelegramReviewPrefix}${id}:back`)],
+            [Markup.button.callback('❌ Скасувати', `${AdminCallbacks.PlayerTelegramImportCancelPrefix}${id}`)],
+        ]));
+    }
+    private async skipProblematic(ctx: Context, id: string): Promise<void> { await this.renderPreview(ctx, this.imports.skipProblematic(id, this.clubId, ctx.from!.id)); }
+    private async commit(ctx: Context, id: string): Promise<void> {
+        const session = this.imports.get(id, this.clubId, ctx.from!.id);
+        if (!session.canCommit) { logger.warn('telegram_import.commit_blocked', { clubId: this.clubId, importSessionId: id, ...safePlanSummary(session) }); await this.renderPreview(ctx, session); return; }
+        try { const result = await this.imports.commit(id, this.clubId, ctx.from!.id); const players = await this.services.repositories.players.list(); await this.services.adminUi.show(ctx, `✅ Імпорт завершено\n\nНових: ${result.created}\nОновлено: ${result.updated}\nБез змін: ${result.unchanged}`, createPlayersKeyboard(players.filter((player) => !player.isConfirmed && player.isActive).length)); }
+        catch (error) { if (error instanceof Error && error.message === 'IMPORT_PLAN_BLOCKED') { const current = this.imports.get(id, this.clubId, ctx.from!.id); logger.warn('telegram_import.commit_blocked', { clubId: this.clubId, importSessionId: id, ...safePlanSummary(current) }); await this.renderPreview(ctx, current); return; } throw error; }
+    }
     private async cancel(ctx: Context, id: string): Promise<void> { this.imports.cancel(id, this.clubId, ctx.from!.id); await this.showRoot(ctx); }
     private async canDisconnect(userId: number): Promise<boolean> { const settings = await this.services.repositories.settings.get(); return this.superAdminIds.includes(userId) || isClubOwner(settings.admins, userId) || (await this.connections.getConnection(this.clubId))?.telegramUserId === userId; }
     private async deleteSensitiveMessage(ctx: Context): Promise<void> { if (!ctx.message || !ctx.chat) return; await ctx.telegram.deleteMessage(ctx.chat.id, ctx.message.message_id).catch(() => undefined); }
@@ -238,4 +289,53 @@ function friendlyError(error: unknown): string {
     if (message.includes('AUTH_KEY')) return 'Підключення Telegram потребує повторної авторизації.';
     if (message.includes('FLOOD_WAIT')) return 'Telegram тимчасово обмежив запити. Спробуйте пізніше.';
     return 'Не вдалося виконати дію з Telegram. Спробуйте ще раз.';
+}
+
+function blockingLabel(type: TelegramPlayerImportSession['blockingTypes'][number]): string {
+    switch (type) {
+        case 'POSSIBLE_DUPLICATE': return 'можливі дублікати';
+        case 'NEEDS_REVIEW': return 'імена потребують перевірки';
+        case 'AMBIGUOUS_MATCH': return 'неоднозначні збіги';
+        case 'DUPLICATE_TELEGRAM_ID': return 'конфлікти Telegram ID';
+        case 'INVALID_PLAYER': return 'некоректні дані';
+    }
+}
+
+export function parseTelegramChatLink(value: string): { chatId?: string; username?: string } | undefined {
+    let url: URL; try { url = new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`); } catch { return undefined; }
+    if (!['t.me', 'telegram.me', 'www.t.me', 'www.telegram.me'].includes(url.hostname.toLocaleLowerCase())) return undefined;
+    const parts = url.pathname.split('/').filter(Boolean);
+    if (!parts.length || parts[0] === 'joinchat' || parts[0].startsWith('+')) return undefined;
+    if (parts[0] === 'c' && /^\d+$/.test(parts[1] ?? '')) return { chatId: `-100${parts[1]}` };
+    return /^[A-Za-z0-9_]{4,}$/.test(parts[0]) ? { username: parts[0] } : undefined;
+}
+
+export function createTelegramSourcePickerKeyboard(requestId: number) {
+    return Markup.keyboard([
+        [Markup.button.groupRequest('💬 Обрати групу', requestId)],
+        [Markup.button.text('↪️ Переслати повідомлення'), Markup.button.text('🔗 Надіслати посилання')],
+        [Markup.button.text('❌ Скасувати')],
+    ]).resize().oneTime();
+}
+
+export type TelegramSourceSelectionResult =
+    | { kind: 'selected'; selector: { chatId: string } }
+    | { kind: 'wrong_request' }
+    | { kind: 'hidden_forward' }
+    | { kind: 'none' };
+
+export function extractTelegramSourceSelector(message: object, expectedRequestId: number): TelegramSourceSelectionResult {
+    if ('chat_shared' in message) {
+        const shared = message.chat_shared as { request_id?: unknown; chat_id?: unknown };
+        if (shared.request_id !== expectedRequestId) return { kind: 'wrong_request' };
+        if (typeof shared.chat_id === 'number' || typeof shared.chat_id === 'string') return { kind: 'selected', selector: { chatId: String(shared.chat_id) } };
+        return { kind: 'none' };
+    }
+    if ('forward_origin' in message && message.forward_origin) {
+        const origin = message.forward_origin as { type?: string; sender_chat?: { id?: unknown }; chat?: { id?: unknown } };
+        const id = origin.type === 'chat' ? origin.sender_chat?.id : origin.type === 'channel' ? origin.chat?.id : undefined;
+        if (typeof id === 'number' || typeof id === 'string') return { kind: 'selected', selector: { chatId: String(id) } };
+        return { kind: 'hidden_forward' };
+    }
+    return { kind: 'none' };
 }

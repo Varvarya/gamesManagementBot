@@ -128,6 +128,16 @@ export class TelegramUserConnectionManager {
         if (connection.telegramUserId !== requestingUserId) throw new Error('CONNECTION_PRIVACY_DENIED');
         return this.withClient(connection, (client) => new TelegramParticipantLoader(client).listGroups());
     }
+    async resolveAccessibleGroup(connection: TelegramUserConnection, requestingUserId: number, selector: { chatId?: string; username?: string }): Promise<TelegramGroupDialog> {
+        if (connection.telegramUserId !== requestingUserId) throw new Error('CONNECTION_PRIVACY_DENIED');
+        const normalizedUsername = selector.username?.replace(/^@/, '').toLocaleLowerCase();
+        const group = await this.withClient(connection, async (client) => {
+            const groups = await new TelegramParticipantLoader(client).listGroups();
+            return findAccessibleTelegramGroup(groups, selector.chatId, normalizedUsername);
+        });
+        if (!group) throw new Error('TELEGRAM_SELECTED_GROUP_INACCESSIBLE');
+        return group;
+    }
     async addSource(clubId: string, connection: TelegramUserConnection, dialog: TelegramGroupDialog, addedBy: number): Promise<TelegramImportSource> {
         if (connection.clubId !== clubId || connection.telegramUserId !== addedBy) throw new Error('CONNECTION_PRIVACY_DENIED');
         const existing = (await this.sources.listByClub(clubId)).find((item) => item.telegramChatId === dialog.id && item.connectionId === connection.id); if (existing) return existing;
@@ -165,3 +175,9 @@ function deferred(): Deferred { let resolve!: (value: string) => void; return { 
 function token(): string { return randomBytes(6).toString('base64url'); }
 function isEncrypted(value: unknown): value is EncryptedTelegramSession { return Boolean(value && typeof value === 'object' && (value as EncryptedTelegramSession).version === 1 && typeof (value as EncryptedTelegramSession).ciphertext === 'string'); }
 function maskPhone(phone: string): string { return `${phone.slice(0, Math.min(4, phone.length))}${'*'.repeat(Math.max(0, phone.length - 6))}${phone.slice(-2)}`; }
+
+export function findAccessibleTelegramGroup(groups: readonly TelegramGroupDialog[], chatId?: string, normalizedUsername?: string): TelegramGroupDialog | undefined {
+    return groups.find((item) => item.id === chatId
+        || (typeof item.entity === 'object' && item.entity !== null && 'username' in item.entity
+            && typeof item.entity.username === 'string' && item.entity.username.toLocaleLowerCase() === normalizedUsername));
+}
