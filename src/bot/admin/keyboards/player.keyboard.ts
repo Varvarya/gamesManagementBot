@@ -21,6 +21,7 @@ export function createPlayersKeyboard(
         ],
         [Markup.button.callback('🆕 Нові', AdminCallbacks.UnconfirmedPlayers)],
         [Markup.button.callback('📥 Імпорт', AdminCallbacks.PlayerImport), Markup.button.callback('📤 Експорт', AdminCallbacks.PlayerExport)],
+        [Markup.button.callback('💬 Імпорт з Telegram', AdminCallbacks.PlayerTelegramImport)],
         [
             Markup.button.callback(
                 '◀️ Назад',

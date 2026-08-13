@@ -30,3 +30,11 @@ The local exporter uses a Telegram **user account** over MTProto; it does not st
 5. Upload the CSV through **Club Admin → Гравці → Імпорт** and review its import preview.
 
 The reusable session string is saved to the ignored `.telegram-session` file with owner-only permissions. Phone numbers, login codes, passwords, API hash, and session contents are never printed. For repeatable selection, `--chat-id <id>` and `--chat-title <title>` are supported. Telegram may restrict full member enumeration; a partial result is explicitly marked in the CLI summary and raw JSON.
+
+## Club-scoped Telegram participant import
+
+The production bot can also scan an approved Telegram group through a club administrator's Telegram user account. Configure `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, and a strong, stable `TELEGRAM_SESSION_ENCRYPTION_KEY` in the server environment. The API credentials belong to the application; each club authenticates its own administrator account under **Гравці → Імпорт з Telegram**.
+
+Encrypted MTProto sessions and club-scoped connection/source metadata are stored below `DATA_DIR/_system/`, so the existing `/app/data` Docker volume preserves them across deployments. The encryption key must remain stable and must never be committed. Connections are opened only on demand; missing or expired connections do not prevent bot startup.
+
+Only the connected account owner can browse that account's group dialogs. Once the owner approves a group as an import source, other authorized club admins may scan that source. Contacts are matched transiently by exact Telegram user ID and unrelated contacts are neither displayed nor persisted. Scanning produces a preview only; explicit confirmation invokes the same additive `PlayerImportService` used by CSV import. It never replaces the database or removes absent players.

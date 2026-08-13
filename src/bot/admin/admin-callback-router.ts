@@ -21,6 +21,7 @@ import { AdminCallbacks } from './callbacks/admin-callbacks';
 import { PlayerDataHandler } from './handlers/player-data.handler';
 import { ClubSetupHandler } from './handlers/club-setup.handler';
 import { ScheduleExceptionHandler } from './handlers/schedule-exception.handler';
+import { TelegramPlayerImportHandler } from './handlers/telegram-player-import.handler';
 
 export type CallbackHandler = {
     canHandle(callback: string): boolean;
@@ -68,6 +69,7 @@ export class AdminCallbackRouter {
         chatHandler: AdminChatHandler,
         settingsHandler: AdminSettingsHandler,
         playerDataHandler: PlayerDataHandler,
+        telegramPlayerImportHandler: TelegramPlayerImportHandler,
         setupHandler: ClubSetupHandler,
         exceptionHandler: ScheduleExceptionHandler,
     ) {
@@ -85,6 +87,7 @@ export class AdminCallbackRouter {
             chatHandler,
             settingsHandler,
             playerDataHandler,
+            telegramPlayerImportHandler,
             setupHandler,
             exceptionHandler,
         ];

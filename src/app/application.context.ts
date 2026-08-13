@@ -50,6 +50,9 @@ import { AdminFlowService } from '../bot/admin/flows/admin-flow.service';
 import { PendingRegistrationSelectionStore, REGISTRATION_SELECTION_PREFIX } from '../bot/registration/pending-registration-selection.store';
 import { PlayerDataHandler } from '../bot/admin/handlers/player-data.handler';
 import { ClubDiagnosticsService } from '../domain/clubs/club-diagnostics.service';
+import { TelegramUserConnectionManager } from '../domain/telegram-import/telegram-user-connection.manager';
+import { TelegramPlayerImportService } from '../domain/telegram-import/telegram-player-import.service';
+import { TelegramPlayerImportHandler } from '../bot/admin/handlers/telegram-player-import.handler';
 
 
 type ApplicationContextOptions = {
@@ -81,6 +84,7 @@ export class ApplicationContext {
     readonly navigation: AdminNavigationService;
     readonly clubContexts: ClubContextManager;
     readonly registrationSelections = new PendingRegistrationSelectionStore();
+    readonly telegramUserConnections: TelegramUserConnectionManager;
 
     private readonly superAdminIds: number[];
     private isShuttingDown = false;
@@ -103,6 +107,7 @@ export class ApplicationContext {
         this.clubs = new ClubRepository(options.dataDir, options.defaultTimezone);
         this.clubCreationRequests = new ClubCreationRequestRepository(path.join(options.dataDir, '_system', 'club-creation-requests.json'));
         this.clubContexts = new ClubContextManager(options.dataDir, options.defaultTimezone, this.clubs, this.sessionContexts);
+        this.telegramUserConnections = new TelegramUserConnectionManager(options.dataDir);
         this.clubHealth = new ClubHealthService(this.clubs, options.dataDir, Number(process.env.CLUB_INACTIVE_DAYS ?? 30), this.clubContexts);
         this.navigation = new AdminNavigationService(this.sessionContexts, new AdminUi(this.sessionContexts), new AdminFlowService());
         this.callbackAuthorization = new CallbackAuthorizationService(this.clubs, this.clubCreationRequests, this.superAdminIds, this.sessionContexts);
@@ -373,6 +378,8 @@ export class ApplicationContext {
         const training = new AdminTrainingHandler(services, publisher, cancellationScheduler);
         const player = new AdminPlayerHandler(services);
         const playerData = new PlayerDataHandler(services, backups);
+        const telegramPlayerImports = new TelegramPlayerImportService(context.clubId, repositories.players, this.telegramUserConnections, () => backups.create());
+        const telegramPlayerImport = new TelegramPlayerImportHandler(services, this.telegramUserConnections, telegramPlayerImports, this.superAdminIds);
         const setup = new ClubSetupHandler(services);
         const exceptions = new ScheduleExceptionHandler(services, exceptionReconciliation, templateScheduler, cancellationScheduler);
         const template = new AdminTemplateHandler(services, templateScheduler);
@@ -381,8 +388,8 @@ export class ApplicationContext {
         const settingsFlow = new SettingsFlowHandler(services, settings);
         const configService = new SuperAdminConfigService(repositories, templateScheduler, backups);
         const superAdminConfig = new SuperAdminConfigHandler(services, configService, [...this.superAdminIds]);
-        const callbackRouter = new AdminCallbackRouter(services, this.callbackAuthorization, context.clubId, this.sessionContexts, navigation, templateFlow, playerFlow, trainingFlow, menu, training, player, template, chat, settings, playerData, setup, exceptions);
-        const textRouter = new AdminTextRouter(services, [chat, settingsFlow, superAdminConfig, playerData], [templateFlow, playerFlow, trainingFlow, settingsFlow, exceptions], this.superAdminIds, this.callbackAuthorization, context.clubId, this.sessionContexts, [settings]);
+        const callbackRouter = new AdminCallbackRouter(services, this.callbackAuthorization, context.clubId, this.sessionContexts, navigation, templateFlow, playerFlow, trainingFlow, menu, training, player, template, chat, settings, playerData, telegramPlayerImport, setup, exceptions);
+        const textRouter = new AdminTextRouter(services, [chat, settingsFlow, superAdminConfig, playerData, telegramPlayerImport], [templateFlow, playerFlow, trainingFlow, settingsFlow, exceptions], this.superAdminIds, this.callbackAuthorization, context.clubId, this.sessionContexts, [settings]);
         const groupRegistration = new GroupRegistrationHandler(services, publisher, this.registrationSelections);
         return { context, publisher, templateScheduler, cancellationScheduler, menu, callbackRouter, textRouter, groupRegistration, superAdminConfig };
     }
