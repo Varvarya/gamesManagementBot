@@ -11,12 +11,13 @@ import { createPlayersKeyboard } from '../keyboards/player.keyboard';
 import { logger } from '../../../utils/logger';
 import { safeTelegramErrorDetails } from '../../../domain/telegram-import/telegram-auth-error';
 
-type SourceSelection = { clubId: string; requestId: number; createdAt: number };
+type SourceSelection = { clubId: string; chatId: number; requestId: number; createdAt: number };
+type NameReviewInput = { clubId: string; chatId: number; sessionId: string; candidateToken: string };
 
 export class TelegramPlayerImportHandler {
     readonly messageStates: readonly AdminFlowState[] = ['waiting_telegram_qr_2fa_password', 'waiting_telegram_import_source', 'waiting_telegram_import_name'];
     private readonly sourceSelections = new Map<number, SourceSelection>();
-    private readonly nameReviews = new Map<number, { sessionId: string; candidateToken: string }>();
+    private readonly nameReviews = new Map<number, NameReviewInput>();
     private readonly qrAttempts = new Map<number, { id: string; chatId: number; messageId?: number }>();
 
     constructor(
@@ -86,7 +87,9 @@ export class TelegramPlayerImportHandler {
     canHandleMessage(adminId: number): boolean { return this.messageStates.includes(this.services.adminFlow.getState(adminId)); }
 
     async handleMessage(ctx: Context): Promise<boolean> {
-        if (!ctx.from || !ctx.message || !this.canHandleMessage(ctx.from.id)) return false;
+        // Telegram import input is an admin-only private-chat flow. A state held
+        // for this user must never consume +1/-1 messages sent in a club group.
+        if (ctx.chat?.type !== 'private' || !ctx.from || !ctx.message || !this.canHandleMessage(ctx.from.id)) return false;
         const state = this.services.adminFlow.getState(ctx.from.id);
         if (state === 'waiting_telegram_import_source') return this.handleSourceMessage(ctx);
         if (state === 'waiting_telegram_import_name') return this.handleReviewName(ctx);
@@ -202,7 +205,7 @@ export class TelegramPlayerImportHandler {
         const adminId = ctx.from!.id; const connection = await this.connections.getConnection(this.clubId);
         if (!connection || connection.telegramUserId !== adminId) throw new Error('CONNECTION_PRIVACY_DENIED');
         const requestId = randomInt(1, 2_147_483_647);
-        this.sourceSelections.set(adminId, { clubId: this.clubId, requestId, createdAt: Date.now() });
+        this.sourceSelections.set(adminId, { clubId: this.clubId, chatId: ctx.chat!.id, requestId, createdAt: Date.now() });
         this.services.adminFlow.start(adminId, 'waiting_telegram_import_source');
         if (ctx.callbackQuery) await ctx.deleteMessage().catch(() => undefined);
         const message = await ctx.reply('💬 Оберіть групу\n\nНатисніть кнопку нижче та виберіть потрібний чат.\n\nТакож можна переслати повідомлення з групи або надіслати посилання t.me.', createTelegramSourcePickerKeyboard(requestId));
@@ -213,7 +216,7 @@ export class TelegramPlayerImportHandler {
         const message = ctx.message;
         if (!message) return false;
         const adminId = ctx.from!.id; const selection = this.sourceSelections.get(adminId);
-        if (!selection || selection.clubId !== this.clubId || Date.now() - selection.createdAt > 10 * 60_000) {
+        if (!selection || selection.clubId !== this.clubId || selection.chatId !== ctx.chat?.id || ctx.chat?.type !== 'private' || Date.now() - selection.createdAt > 10 * 60_000) {
             this.sourceSelections.delete(adminId); this.services.adminFlow.finish(adminId);
             await this.removeSourceKeyboard(ctx, '⚠️ Вибір чату вже неактуальний. Відкрийте його знову.'); return true;
         }
@@ -288,8 +291,8 @@ export class TelegramPlayerImportHandler {
         const session = await this.imports.resolveReview(callback.sessionId, this.clubId, ctx.from!.id, callback.candidateToken, decision);
         const next = await this.imports.getNextReview(callback.sessionId, this.clubId, ctx.from!.id); if (next) await this.renderReviewCandidate(ctx, callback.sessionId, next); else await this.renderPreview(ctx, session);
     }
-    private async startRename(ctx: Context, payload: string): Promise<void> { const [sessionId, candidateToken] = payload.split(':'); if (!sessionId || !candidateToken) throw new Error('STALE_CALLBACK'); this.imports.get(sessionId, this.clubId, ctx.from!.id); this.nameReviews.set(ctx.from!.id, { sessionId, candidateToken }); this.services.adminFlow.start(ctx.from!.id, 'waiting_telegram_import_name'); await this.services.adminUi.show(ctx, '✏️ Вкажіть імʼя гравця.', Markup.inlineKeyboard([[Markup.button.callback('◀️ До огляду', `${AdminCallbacks.PlayerTelegramOverviewPrefix}${sessionId}`)]])); }
-    private async handleReviewName(ctx: Context): Promise<boolean> { if (!ctx.from || !ctx.message || !('text' in ctx.message)) return true; const pending = this.nameReviews.get(ctx.from.id); if (!pending) throw new Error('STALE_CALLBACK'); const displayName = ctx.message.text.trim().replace(/\s+/g, ' '); if (!/\p{L}/u.test(displayName)) { await ctx.reply('Вкажіть імʼя, що містить літери.'); return true; } this.nameReviews.delete(ctx.from.id); this.services.adminFlow.finish(ctx.from.id); const session = await this.imports.resolveReview(pending.sessionId, this.clubId, ctx.from.id, pending.candidateToken, { type: 'rename_and_create', displayName }); const next = await this.imports.getNextReview(pending.sessionId, this.clubId, ctx.from.id); if (next) await this.renderReviewCandidate(ctx, pending.sessionId, next); else await this.renderPreview(ctx, session); return true; }
+    private async startRename(ctx: Context, payload: string): Promise<void> { const [sessionId, candidateToken] = payload.split(':'); if (!sessionId || !candidateToken || ctx.chat?.type !== 'private') throw new Error('STALE_CALLBACK'); this.imports.get(sessionId, this.clubId, ctx.from!.id); this.nameReviews.set(ctx.from!.id, { clubId: this.clubId, chatId: ctx.chat.id, sessionId, candidateToken }); this.services.adminFlow.start(ctx.from!.id, 'waiting_telegram_import_name'); await this.services.adminUi.show(ctx, '✏️ Вкажіть імʼя гравця.', Markup.inlineKeyboard([[Markup.button.callback('◀️ До огляду', `${AdminCallbacks.PlayerTelegramOverviewPrefix}${sessionId}`)]])); }
+    private async handleReviewName(ctx: Context): Promise<boolean> { if (!ctx.from || !ctx.message || !('text' in ctx.message)) return true; const pending = this.nameReviews.get(ctx.from.id); if (!pending || pending.clubId !== this.clubId || pending.chatId !== ctx.chat?.id || ctx.chat?.type !== 'private') return false; const displayName = ctx.message.text.trim().replace(/\s+/g, ' '); if (!/\p{L}/u.test(displayName)) { await ctx.reply('Вкажіть імʼя, що містить літери.'); return true; } this.nameReviews.delete(ctx.from.id); this.services.adminFlow.finish(ctx.from.id); const session = await this.imports.resolveReview(pending.sessionId, this.clubId, ctx.from.id, pending.candidateToken, { type: 'rename_and_create', displayName }); const next = await this.imports.getNextReview(pending.sessionId, this.clubId, ctx.from.id); if (next) await this.renderReviewCandidate(ctx, pending.sessionId, next); else await this.renderPreview(ctx, session); return true; }
     private async skipProblematic(ctx: Context, id: string): Promise<void> { logger.info('telegram_import.callback_received', { clubId: this.clubId, importSessionId: id, action: 'skip_problematic' }); await this.renderPreview(ctx, await this.imports.skipProblematic(id, this.clubId, ctx.from!.id)); }
     private async commit(ctx: Context, id: string): Promise<void> {
         const session = this.imports.get(id, this.clubId, ctx.from!.id);

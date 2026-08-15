@@ -269,6 +269,7 @@ export class ApplicationContext {
 
                 const runtime = await this.findRuntimeForChat(ctx.chat.id);
                 if (runtime) await runtime.groupRegistration.handle(ctx);
+                else if ('text' in ctx.message && /^[+-]/.test(ctx.message.text.trim())) logger.warn('telegram.registration.club_not_resolved', { chatId: ctx.chat.id, telegramUserId: ctx.from?.id, updateId: ctx.update.update_id });
             },
         );
 
@@ -403,7 +404,7 @@ export class ApplicationContext {
             try {
                 const runtime = await this.getClubRuntime(club.id);
                 if (await runtime.context.repositories.chats.getById(chatId)) return runtime;
-            } catch { /* A broken club must not block another club's group update. */ }
+            } catch (error) { logger.warn('telegram.registration.club_resolution_failed', { clubId: club.id, chatId, reason: error instanceof Error ? error.message : String(error) }); }
         }
         return undefined;
     }
