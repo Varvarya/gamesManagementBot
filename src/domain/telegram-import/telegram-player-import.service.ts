@@ -90,12 +90,12 @@ export class TelegramPlayerImportService {
         if (!source) return this.resolveAmbiguous(id, clubId, requestedBy, candidateToken, decision);
         if (session.decisions[candidateToken]) throw new Error('CANDIDATE_ALREADY_RESOLVED');
         if (decision.type === 'merge_existing' && !source.candidatePlayerIds.includes(decision.existingPlayerId)) throw new Error('TELEGRAM_IMPORT_REVIEW_STALE');
-        const decisions = { ...session.decisions, [candidateToken]: decision }; const rebuilt = await this.rebuild({ ...session, decisions }); this.sessions.set(id, rebuilt);
+        const decisions = { ...session.decisions, [candidateToken]: decision }; const rebuilt = await this.rebuild({ ...session, decisions }); this.assertDecisionApplied(session, rebuilt, candidateToken, source.type, decision); this.sessions.set(id, rebuilt);
         logger.info('telegram_import.review_updated', { clubId, importSessionId: id, candidateToken, decisionType: decision.type, remainingBlockedCount: rebuilt.blockedCount, blockingTypes: rebuilt.blockingTypes, canCommit: rebuilt.canCommit }); return structuredClone(rebuilt);
     }
     async getNextAmbiguous(id: string, clubId: string, requestedBy: number): Promise<TelegramAmbiguousReview | undefined> {
         const session = this.get(id, clubId, requestedBy); const descriptor = findNextUnresolvedCandidate(session); if (!descriptor || descriptor.type !== 'AMBIGUOUS_MATCH') return undefined;
-        const conflict = session.plan.conflicts[descriptor.conflictIndex!]; const item = session.importCandidates.find((value) => value.token === descriptor.candidateToken);
+        const conflict = session.plan.conflicts[descriptor.conflictIndex!]; const item = effectiveItems(session).find((value) => value.token === descriptor.candidateToken);
         if (!conflict || !item) throw new Error('TELEGRAM_IMPORT_REVIEW_STALE');
         const players = await this.players.list(); const choices = (conflict.candidatePlayerIds ?? []).flatMap((playerId) => { const player = players.find((value) => value.id === playerId); return player ? [{ token: playerToken(player.id), id: player.id, displayName: player.displayName }] : []; });
         const unresolved = unresolvedPlanConflictCandidates(session);
@@ -104,12 +104,12 @@ export class TelegramPlayerImportService {
     async resolveAmbiguous(id: string, clubId: string, requestedBy: number, candidateToken: string, decision: TelegramImportDecision): Promise<TelegramPlayerImportSession> {
         const session = this.get(id, clubId, requestedBy); const item = session.importCandidates.find((value) => value.token === candidateToken); if (!item) throw new Error('TELEGRAM_IMPORT_REVIEW_STALE');
         if (decision.type === 'merge_existing' && !(await this.players.list()).some((player) => player.id === decision.existingPlayerId)) throw new Error('TELEGRAM_IMPORT_REVIEW_STALE');
-        const decisions = { ...session.decisions, [candidateToken]: decision }; const updated = await this.rebuild({ ...session, decisions }); this.sessions.set(id, updated);
+        const decisions = { ...session.decisions, [candidateToken]: decision }; const updated = await this.rebuild({ ...session, decisions }); this.assertDecisionApplied(session, updated, candidateToken, 'AMBIGUOUS_MATCH', decision); this.sessions.set(id, updated);
         logger.info('telegram_import.review_updated', { clubId, importSessionId: id, candidateToken, decisionType: decision.type, remainingBlockedCount: updated.blockedCount, blockingTypes: updated.blockingTypes, canCommit: updated.canCommit });
         return structuredClone(updated);
     }
     resolvePlayerToken(id: string, clubId: string, requestedBy: number, candidateToken: string, tokenValue: string): string {
-        const session = this.get(id, clubId, requestedBy); const conflict = ambiguousConflicts(session.plan).find((value) => session.importCandidates[value.rows[0] - 2]?.token === candidateToken); const source = session.reviewCandidates.find((item) => item.token === candidateToken);
+        const session = this.get(id, clubId, requestedBy); const items = effectiveItems(session); const conflict = ambiguousConflicts(session.plan).find((value) => value.rows.some((row) => items[row - 2]?.token === candidateToken)); const source = session.reviewCandidates.find((item) => item.token === candidateToken);
         const playerId = [...(conflict?.candidatePlayerIds ?? []), ...(source?.candidatePlayerIds ?? [])].find((value) => playerToken(value) === tokenValue); if (!playerId) throw new Error('TELEGRAM_IMPORT_REVIEW_STALE'); return playerId;
     }
     cancel(id: string, clubId: string, requestedBy: number): void { const session = this.get(id, clubId, requestedBy); this.sessions.set(id, { ...session, state: 'cancelled' }); logger.info('telegram_import.cancelled', { clubId, importSessionId: id }); }
@@ -120,11 +120,20 @@ export class TelegramPlayerImportService {
         const summary = importReadiness(plan, possibleDuplicateCount, reviewCount); const state = summary.canCommit ? 'ready' : 'reviewing'; const rebuilt = { ...session, plan, possibleDuplicateCount, reviewCount, ...summary, state } as TelegramPlayerImportSession;
         logger.info('telegram_import.plan_rebuilt', { clubId: session.clubId, importSessionId: session.id, ...safePlanSummary(rebuilt) }); return rebuilt;
     }
+    private assertDecisionApplied(before: TelegramPlayerImportSession, after: TelegramPlayerImportSession, candidateToken: string, candidateType: TelegramImportBlockingType, decision: TelegramImportDecision): void {
+        const stillBlocked = blockedCandidateTokens(after).has(candidateToken);
+        if (!stillBlocked && after.blockedCount < before.blockedCount) return;
+        logger.error('telegram_import.decision_not_applied', { clubId: before.clubId, importSessionId: before.id, candidateToken, candidateType, decisionType: decision.type, blockedCountBefore: before.blockedCount, blockedCountAfter: after.blockedCount });
+        throw new Error('TELEGRAM_IMPORT_DECISION_NOT_APPLIED');
+    }
     private async buildPlan(items: readonly TelegramImportCandidate[], decisions: Readonly<Record<string, TelegramImportDecision>>, reviewItems: readonly TelegramReviewSource[] = []): Promise<PlayerImportPlan> {
-        const resolved = reviewItems.filter((item) => { const decision = decisions[item.token]; return decision && decision.type !== 'skip'; }); const planned = [...items, ...resolved];
+        // Keep one stable row for every original candidate for the whole session.
+        // Decisions change row intent, never row identity or ordering.
+        const planned = [...items, ...reviewItems];
         const csv = ['displayName,telegramUserId,telegramUsername,aliases,confirmed,active', ...planned.map((item) => { const decision = decisions[item.token]; const name = decision?.type === 'rename_and_create' ? decision.displayName : item.candidate.suggestedDisplayName; return [name, item.candidate.telegramUserId, item.candidate.telegramUsername, item.candidate.aliases.join('|'), true, true].map(escapeCsv).join(','); })].join('\n');
         const rowResolutions: Record<number, PlayerImportRowResolution> = {}; const skippedRows: number[] = [];
-        planned.forEach((item, index) => { const row = index + 2; const decision = decisions[item.token]; if (decision?.type === 'merge_existing') rowResolutions[row] = { kind: 'existing', playerId: decision.existingPlayerId }; else if (decision?.type === 'create_new' || decision?.type === 'rename_and_create') rowResolutions[row] = { kind: 'create' }; else if (decision?.type === 'skip') skippedRows.push(row); });
+        const reviewTokens = new Set(reviewItems.map((item) => item.token));
+        planned.forEach((item, index) => { const row = index + 2; const decision = decisions[item.token]; if (decision?.type === 'merge_existing') rowResolutions[row] = { kind: 'existing', playerId: decision.existingPlayerId }; else if (decision?.type === 'create_new' || decision?.type === 'rename_and_create') rowResolutions[row] = { kind: 'create' }; else if (decision?.type === 'skip' || (reviewTokens.has(item.token) && !decision)) skippedRows.push(row); });
         return this.imports.preview(csv, { rowResolutions, skippedRows });
     }
 }
@@ -133,13 +142,18 @@ function ambiguousConflicts(plan: PlayerImportPlan) { return plan.conflicts.filt
 type ReviewCandidateDescriptor = { type: 'AMBIGUOUS_MATCH' | 'POSSIBLE_DUPLICATE' | 'NEEDS_REVIEW'; candidateToken: string; conflictIndex?: number };
 function unresolvedPlanConflictCandidates(session: TelegramPlayerImportSession): ReviewCandidateDescriptor[] {
     const result: ReviewCandidateDescriptor[] = [];
+    const items = effectiveItems(session);
     session.plan.conflicts.forEach((conflict, conflictIndex) => {
         for (const row of conflict.rows) {
-            const item = session.importCandidates?.[row - 2];
+            const item = items[row - 2];
             if (item && !session.decisions[item.token]) result.push({ type: 'AMBIGUOUS_MATCH', candidateToken: item.token, conflictIndex });
         }
     });
     return result;
+}
+function effectiveItems(session: Pick<TelegramPlayerImportSession, 'importCandidates' | 'reviewCandidates'>): TelegramImportCandidate[] { return [...(session.importCandidates ?? []), ...(session.reviewCandidates ?? [])]; }
+function blockedCandidateTokens(session: TelegramPlayerImportSession): Set<string> {
+    return new Set([...unresolvedPlanConflictCandidates(session).map((item) => item.candidateToken), ...session.reviewCandidates.filter((item) => !session.decisions[item.token]).map((item) => item.token)]);
 }
 export function findNextUnresolvedCandidate(session: TelegramPlayerImportSession): ReviewCandidateDescriptor | undefined {
     const conflict = unresolvedPlanConflictCandidates(session)[0]; if (conflict) return conflict;

@@ -111,15 +111,16 @@ test('161 new, four ambiguous matches and three review names resolve into a comm
     ];
     const service = new TelegramPlayerImportService('club-a', players, { scan: async () => ({ participants, contacts: [], partial: false }) }, async () => undefined);
     const preview = await service.scan(source('club-a'), 10); assert.equal(preview.plan.newCount, 161); assert.equal(preview.reviewCount, 3); assert.equal(preview.plan.conflictCount, 4); assert.equal(preview.blockedCount, 7);
-    let current = await service.skipProblematic(preview.id, 'club-a', 10); assert.equal(current.blockedCount, 4); assert.deepEqual(current.blockingTypes, ['AMBIGUOUS_MATCH']);
+    const first = await service.getNextReview(preview.id, 'club-a', 10); assert.equal(first?.type, 'AMBIGUOUS_MATCH');
+    let current = await service.resolveReview(preview.id, 'club-a', 10, first!.candidateToken, { type: 'create_new' }); assert.equal(current.blockedCount, 6); assert.equal(current.plan.newCount, 162);
+    current = await service.skipProblematic(preview.id, 'club-a', 10); assert.equal(current.blockedCount, 3); assert.deepEqual(current.blockingTypes, ['AMBIGUOUS_MATCH']);
     const diagnostic: string[] = [];
-    for (const [index, decision] of ['merge', 'create', 'skip', 'merge'].entries()) {
+    for (const [index, decision] of ['merge', 'skip', 'merge'].entries()) {
         const review = await service.getNextAmbiguous(preview.id, 'club-a', 10); assert.ok(review); diagnostic.push(`${review.telegramUsername}:${review.players.map((player) => player.displayName).join('|')}`);
         if (decision === 'merge') current = await service.resolveAmbiguous(preview.id, 'club-a', 10, review.candidateToken, { type: 'merge_existing', existingPlayerId: review.players[index === 0 ? 0 : 1].id });
-        else if (decision === 'create') current = await service.resolveAmbiguous(preview.id, 'club-a', 10, review.candidateToken, { type: 'create_new' });
         else current = await service.resolveAmbiguous(preview.id, 'club-a', 10, review.candidateToken, { type: 'skip' });
     }
-    assert.deepEqual(diagnostic, ['ambiguous_1:Alex Primary|Alex Secondary', 'ambiguous_4:Ivan Primary|Ivan Secondary', 'ambiguous_3:Maria Primary|Maria Secondary', 'ambiguous_2:Sasha Primary|Sasha Secondary']);
+    assert.deepEqual(diagnostic, ['ambiguous_4:Ivan Primary|Ivan Secondary', 'ambiguous_3:Maria Primary|Maria Secondary', 'ambiguous_2:Sasha Primary|Sasha Secondary']);
     assert.equal(current.blockedCount, 0); assert.equal(current.canCommit, true);
     assert.deepEqual(await service.commit(preview.id, 'club-a', 10), { created: 162, updated: 2, unchanged: 0 });
 });

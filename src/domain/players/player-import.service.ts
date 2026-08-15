@@ -30,7 +30,9 @@ export class PlayerImportService {
         logger.info('player_import_parsed', { clubId: this.clubId, rowCount: parsed.rows.length, errorCount: parsed.errors.length });
         const existing = await this.players.list();
         const skippedRows = new Set(options.skippedRows ?? []);
-        const conflicts = findCsvConflicts(parsed.rows.filter((row) => !skippedRows.has(row.rowNumber)));
+        const activeRows = parsed.rows.filter((row) => !skippedRows.has(row.rowNumber));
+        const explicitlyResolvedRows = new Set(Object.keys(options.rowResolutions ?? {}).map(Number));
+        const conflicts = findCsvConflicts(activeRows, explicitlyResolvedRows);
         const blockedRows = new Set(conflicts.flatMap((conflict) => conflict.rows));
         const operations: PlayerImportOperation[] = [];
         for (const row of parsed.rows) {
@@ -102,7 +104,7 @@ export class PlayerImportService {
     }
 }
 
-function findCsvConflicts(rows: PlayerCsvRow[]): PlayerImportConflict[] {
+function findCsvConflicts(rows: PlayerCsvRow[], explicitlyResolvedRows: ReadonlySet<number>): PlayerImportConflict[] {
     const byTelegram = new Map<number, PlayerCsvRow[]>();
     for (const row of rows) if (row.telegramUserId !== undefined) byTelegram.set(row.telegramUserId, [...(byTelegram.get(row.telegramUserId) ?? []), row]);
     const conflicts: PlayerImportConflict[] = [...byTelegram].filter(([, values]) => values.length > 1).map(([telegramUserId, values]) => ({
@@ -110,7 +112,11 @@ function findCsvConflicts(rows: PlayerCsvRow[]): PlayerImportConflict[] {
         message: `telegramUserId ${telegramUserId} використано декілька разів`,
     }));
     const byName = new Map<string, PlayerCsvRow[]>();
+    // An explicit create/merge decision resolves name ambiguity for that row.
+    // Telegram identity duplicates remain hard conflicts and are intentionally
+    // checked above even when a row has an explicit resolution.
     for (const row of rows) {
+        if (explicitlyResolvedRows.has(row.rowNumber)) continue;
         const key = normalizePlayerValue(row.displayName);
         byName.set(key, [...(byName.get(key) ?? []), row]);
     }
