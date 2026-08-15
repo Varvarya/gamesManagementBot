@@ -114,7 +114,7 @@ export class RegistrationService {
             const player = await this.players.findByTelegramId(owner);
             if (!player) return [];
             return candidates.filter((training) => [...training.participants, ...training.waitlist]
-                .some((entry) => entry.playerId === player.id && entry.registeredByTelegramUserId === owner));
+                .some((entry) => (entry.source === 'telegram_self' || entry.source === 'telegram') && (entry.registeredByTelegramUserId === owner || (entry.registeredByTelegramUserId === undefined && entry.telegramUserId === owner)) && (entry.playerId === player.id || entry.telegramUserId === owner)));
         }
         const resolved: string[] = [];
         for (const name of input.command.targetNames) {

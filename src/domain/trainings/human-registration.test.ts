@@ -134,6 +134,56 @@ test('self increments up to four and cancellation decrements/removes only self',
     assert.equal(h.get().participants.length, 0);
 });
 
+test('self registration quantities obey arithmetic semantics for every command history', async () => {
+    const cases: Array<{ commands: string[]; expected: number }> = [
+        { commands: ['+1', '+1', '+1', '-2'], expected: 1 },
+        { commands: ['+2', '-2'], expected: 0 },
+        { commands: ['+4', '-3'], expected: 1 },
+        { commands: ['+1', '-4'], expected: 0 },
+        { commands: ['+1', '+1', '-1'], expected: 1 },
+        { commands: ['+3', '-1', '-1'], expected: 1 },
+        { commands: ['+1', '+1', '+1', '-1', '-1', '-1'], expected: 0 },
+    ];
+    for (const { commands, expected } of cases) {
+        const h = createHarness(20);
+        for (const command of commands) await h.execute(command, 77, 'Папаня');
+        const places = [...h.get().participants, ...h.get().waitlist]
+            .filter((entry) => entry.registeredByTelegramUserId === 77 && entry.source === 'telegram_self')
+            .reduce((sum, entry) => sum + entry.places, 0);
+        assert.equal(places, expected, commands.join(' '));
+    }
+});
+
+test('equivalent aggregate and repeated-add histories both leave one place after -2', async () => {
+    const totals: number[] = [];
+    for (const commands of [['+3', '-2'], ['+1', '+1', '+1', '-2']]) {
+        const h = createHarness(20);
+        for (const command of commands) await h.execute(command, 77, 'Папаня');
+        totals.push([...h.get().participants, ...h.get().waitlist].reduce((sum, entry) => sum + entry.places, 0));
+    }
+    assert.deepEqual(totals, [1, 1]);
+});
+
+test('plain -N consumes split self entries across waitlist then main list and preserves named guests', async () => {
+    const h = createHarness(3);
+    await h.execute('+1', 77, 'Папаня');
+    const selfPlayer = h.players[0];
+    const value = h.get();
+    value.participants = [
+        { id: 'self-active-old', playerId: selfPlayer.id, displayName: 'Папаня', telegramUserId: 77, registeredByTelegramUserId: 77, places: 2, source: 'telegram_self', status: 'active', createdAt: '2026-08-15T10:00:00.000Z', updatedAt: '' },
+        { id: 'named-guest', playerId: 'guest', displayName: 'Іван', registeredByTelegramUserId: 77, places: 1, source: 'telegram_guest', status: 'active', createdAt: '2026-08-15T11:00:00.000Z', updatedAt: '' },
+    ];
+    value.waitlist = [
+        { id: 'self-wait-new', playerId: selfPlayer.id, displayName: 'Папаня', telegramUserId: 77, registeredByTelegramUserId: 77, places: 1, source: 'telegram_self', status: 'waiting', createdAt: '2026-08-15T12:00:00.000Z', updatedAt: '' },
+    ];
+
+    await h.execute('-2', 77, 'Папаня');
+
+    assert.deepEqual(h.get().waitlist, []);
+    assert.equal(h.get().participants.find((entry) => entry.id === 'self-active-old')?.places, 1);
+    assert.equal(h.get().participants.find((entry) => entry.id === 'named-guest')?.places, 1);
+});
+
 test('named registrations are separate, sender-owned, and protected from another sender', async () => {
     const h = createHarness();
     await h.execute('+3 Евгений', 1, 'Олександр');

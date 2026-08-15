@@ -47,9 +47,14 @@ export class TrainingParticipantsService {
                 if (input.registeredByTelegramUserId === undefined && this.findParticipant(training, input.playerId)) {
                     throw new Error('Player is already registered');
                 }
+                if (input.source === 'telegram_self' && input.registeredByTelegramUserId !== undefined) {
+                    const ownedPlaces = this.ownedSelfEntries(training, input.playerId, input.registeredByTelegramUserId)
+                        .reduce((sum, entry) => sum + entry.places, 0);
+                    if (ownedPlaces + input.places > 4) throw new Error('MAX_REGISTRATION_PLACES');
+                }
                 const existing = this.findOwnedParticipant(training, input.playerId, input.registeredByTelegramUserId);
             if (existing) {
-                if (existing.places + input.places > 4) throw new Error('MAX_REGISTRATION_PLACES');
+                if (input.source !== 'telegram_self' && existing.places + input.places > 4) throw new Error('MAX_REGISTRATION_PLACES');
                 const wasActive = existing.status === 'active';
                 if (wasActive && this.countFreePlaces(training) < input.places) {
                     training.participants = training.participants.filter((entry) => entry.id !== existing.id);
@@ -130,7 +135,38 @@ export class TrainingParticipantsService {
     }
 
     async removeOwnedSelf(input: { trainingId: string; playerId: string; registeredByTelegramUserId: number; places: number }): Promise<ParticipantMutation> {
-        return this.removeOwnedEntries(input.trainingId, [{ playerId: input.playerId, places: input.places }], input.registeredByTelegramUserId, true).then((results) => results[0]);
+        this.validatePlaces(input.places);
+        return this.serialize(input.trainingId, async () => {
+            const training = await this.trainings.getRequired(input.trainingId);
+            this.ensureTrainingIsOpen(training);
+            const owned = this.ownedSelfEntries(training, input.playerId, input.registeredByTelegramUserId);
+            if (!owned.length) throw new Error('SELF_NOT_REGISTERED');
+
+            let remaining = input.places;
+            let removedPlaces = 0;
+            let freedActive = false;
+            // Cancelling queue reservations first is deterministic and avoids
+            // promoting a place that the same owner immediately removes.
+            for (const entry of owned) {
+                if (remaining === 0) break;
+                const decrement = Math.min(entry.places, remaining);
+                entry.places -= decrement;
+                remaining -= decrement;
+                removedPlaces += decrement;
+                freedActive ||= entry.status === 'active' && decrement > 0;
+                if (entry.places === 0) {
+                    training.participants = training.participants.filter((item) => item.id !== entry.id);
+                    training.waitlist = training.waitlist.filter((item) => item.id !== entry.id);
+                } else entry.updatedAt = nowIso();
+            }
+
+            const promotedPlayerIds = freedActive ? this.promoteWaitlist(training) : [];
+            const saved = await this.trainings.save(training);
+            const remainingPlaces = this.ownedSelfEntries(saved, input.playerId, input.registeredByTelegramUserId).reduce((sum, entry) => sum + entry.places, 0);
+            const outcome: ParticipantMutation['outcome'] = remainingPlaces > 0 ? 'decremented' : 'removed';
+            logger.info('registration.removed', { trainingId: saved.id, playerId: input.playerId, registeredByTelegramUserId: input.registeredByTelegramUserId, requestedPlaces: input.places, removedPlaces, remainingPlaces, outcome, promotedPlayerIds });
+            return { training: saved, outcome, promotedPlayerIds };
+        });
     }
 
     async removeOwnedNamed(input: { trainingId: string; playerIds: string[]; registeredByTelegramUserId: number; placesPerEntry: number }): Promise<ParticipantMutation[]> {
@@ -170,6 +206,14 @@ export class TrainingParticipantsService {
 
     private findOwnedParticipant(training: Training, playerId: string, owner: number | undefined): ParticipantEntry | undefined {
         return [...training.participants, ...training.waitlist].find((entry) => entry.playerId === playerId && entry.registeredByTelegramUserId === owner);
+    }
+
+    private ownedSelfEntries(training: Training, playerId: string, owner: number): ParticipantEntry[] {
+        const isOwnedSelf = (entry: ParticipantEntry) => (entry.source === 'telegram_self' || entry.source === 'telegram')
+            && (entry.registeredByTelegramUserId === owner || (entry.registeredByTelegramUserId === undefined && entry.telegramUserId === owner))
+            && (entry.playerId === playerId || entry.telegramUserId === owner);
+        const newestFirst = (a: ParticipantEntry, b: ParticipantEntry) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id);
+        return [...training.waitlist.filter(isOwnedSelf).sort(newestFirst), ...training.participants.filter(isOwnedSelf).sort(newestFirst)];
     }
 
     private async removeOwnedEntries(trainingId: string, targets: Array<{ playerId: string; places: number }>, owner: number, self: boolean): Promise<ParticipantMutation[]> {
