@@ -385,7 +385,7 @@ export class ApplicationContext {
         const telegramPlayerImports = new TelegramPlayerImportService(context.clubId, repositories.players, this.telegramUserConnections, () => backups.create());
         const telegramPlayerImport = new TelegramPlayerImportHandler(services, this.telegramUserConnections, this.telegramQrAuth, telegramPlayerImports, this.superAdminIds);
         const setup = new ClubSetupHandler(services);
-        const exceptions = new ScheduleExceptionHandler(services, exceptionReconciliation, templateScheduler, cancellationScheduler);
+        const exceptions = new ScheduleExceptionHandler(services, exceptionReconciliation, templateScheduler, cancellationScheduler, training, publisher);
         const template = new AdminTemplateHandler(services, templateScheduler);
         const settings = new AdminSettingsHandler(services, cancellationScheduler, backups, templateScheduler, this.superAdminIds);
         const chat = new AdminChatHandler(services);

@@ -10,6 +10,13 @@ import { TrainingService } from './domain/trainings/training.service';
 import { TrainingParticipantsService } from './domain/trainings/training-participants.service';
 import { RepositoriesContext } from './app/repositories.context';
 import { JsonStorage } from './storage/jsonStorage';
+import { UpcomingTrainingsQueryService } from './domain/trainings/upcoming-trainings-query.service';
+import { ScheduleOccurrenceResolver } from './domain/schedule-exceptions/schedule-occurrence.resolver';
+import { TrainingTemplate } from './domain/templates/template.types';
+import { ServicesContext } from './app/services.context';
+import { TemplateSchedulerService } from './domain/templates/template-scheduler.service';
+import { SchedulerService, SchedulerTemplate } from './scheduler/scheduler.service';
+import { TrainingPublisherService } from './domain/trainings/training-publisher.service';
 
 async function fixture() {
     const root = await mkdtemp(path.join(os.tmpdir(), 'gamesbot-readiness-'));
@@ -71,4 +78,85 @@ test('training lifecycle rejects impossible transitions', async (t) => {
     await service.close(draft.id);
     assert.equal((await service.finish(draft.id)).status, 'finished');
     assert.equal((await service.archive(draft.id)).status, 'archived');
+});
+
+test('upcoming query is read-only, detects missed publication, and replaces occurrence with created training', async (t) => {
+    const { root, repositories } = await fixture();
+    t.after(() => rm(root, { recursive: true, force: true }));
+    await repositories.chats.create({ id: -100, name: 'Основний', enabled: true });
+    const schedule: TrainingTemplate = {
+        id: 'schedule', clubId: 'club-a', chatId: -100, title: 'Вечірні тренування', placesLimit: 12, minPlayers: 4,
+        publishDaysBefore: 1, publishTime: '12:00', enabled: true,
+        slots: [{ id: 'monday', dayOfWeek: 1, startTime: '18:00', endTime: '20:00', enabled: true }],
+        createdAt: '', updatedAt: '',
+    };
+    await repositories.templates.save(schedule);
+    const query = new UpcomingTrainingsQueryService(repositories, new ScheduleOccurrenceResolver(), () => new Date('2026-08-16T12:00:00Z'));
+    const storageFiles = ['templates.json', 'trainings.json', 'schedule-exceptions.json'];
+    const before = await Promise.all(storageFiles.map((name) => readFile(path.join(root, 'club-a', name), 'utf8')));
+
+    const missed = await query.list(3);
+
+    assert.equal(missed.length, 1);
+    assert.equal(missed[0].type, 'MISSED_PUBLICATION');
+    assert.deepEqual(await Promise.all(storageFiles.map((name) => readFile(path.join(root, 'club-a', name), 'utf8'))), before);
+
+    const trainings = new TrainingService(repositories);
+    const draft = await trainings.createDraft({ clubId: 'club-a', chatId: -100, templateId: schedule.id, templateSlotId: 'monday', title: schedule.title,
+        date: '2026-08-17', startTime: '18:00', endTime: '20:00', placesLimit: 12, minPlayers: 4 });
+    await trainings.publish({ trainingId: draft.id, messageId: 42 });
+    const created = await query.list(3);
+    assert.equal(created.length, 1);
+    assert.equal(created[0].type, 'CREATED_TRAINING');
+    assert.equal(created[0].training?.id, draft.id);
+});
+
+test('upcoming query represents a paused schedule only once', async (t) => {
+    const { root, repositories } = await fixture();
+    t.after(() => rm(root, { recursive: true, force: true }));
+    await repositories.templates.save({
+        id: 'paused', clubId: 'club-a', chatId: -100, title: 'Денні тренування', placesLimit: 12, minPlayers: 4,
+        publishDaysBefore: 1, publishTime: '12:00', enabled: false,
+        slots: [1, 2, 3, 4, 5, 6, 7].map((dayOfWeek) => ({ id: `day-${dayOfWeek}`, dayOfWeek, startTime: '12:00', endTime: '14:00', enabled: true })),
+        createdAt: '', updatedAt: '',
+    });
+    const items = await new UpcomingTrainingsQueryService(repositories, new ScheduleOccurrenceResolver(), () => new Date('2026-08-16T08:00:00Z')).list(7);
+    assert.equal(items.length, 1);
+    assert.equal(items[0].type, 'PAUSED_SCHEDULE');
+});
+
+test('opening upcoming repeatedly leaves automatic publication job intact and it still fires once', async (t) => {
+    const { root, repositories } = await fixture();
+    t.after(() => rm(root, { recursive: true, force: true }));
+    await repositories.chats.create({ id: -100, name: 'Основний', enabled: true });
+    const template: TrainingTemplate = {
+        id: 'automatic', clubId: 'club-a', chatId: -100, title: 'Автоматичне', placesLimit: 12, minPlayers: 4,
+        publishDaysBefore: 1, publishTime: '18:20', enabled: true,
+        slots: [{ id: 'monday', dayOfWeek: 1, startTime: '18:00', endTime: '20:00', enabled: true }], createdAt: '', updatedAt: '',
+    };
+    await repositories.templates.save(template);
+    const services = new ServicesContext(repositories);
+    const jobs = new Map<string, () => Promise<void>>();
+    const fakeScheduler = {
+        cancelAll: () => jobs.clear(),
+        cancelTemplate: (id: string) => jobs.delete(id),
+        cancelByPrefix: (prefix: string) => { for (const id of [...jobs.keys()]) if (id.startsWith(prefix)) jobs.delete(id); },
+        rescheduleTemplate: (job: SchedulerTemplate, handler: () => Promise<void>) => { jobs.set(job.id, handler); },
+        getScheduledTemplateIds: () => [...jobs.keys()],
+        getJobsSnapshot: () => [...jobs.keys()].map((jobId) => ({ jobId })),
+    } as unknown as SchedulerService;
+    let publications = 0;
+    const publisher = { publishTemplateSlot: async () => { publications += 1; return { id: 'training', status: 'open', messageId: 42 }; } } as unknown as TrainingPublisherService;
+    const fixedNow = () => new Date('2026-08-16T08:00:00Z');
+    const automatic = new TemplateSchedulerService(services.templates, fakeScheduler, publisher, services.chats, repositories.settings, fixedNow);
+    await automatic.restore([template]);
+    const jobIds = [...jobs.keys()];
+    const query = new UpcomingTrainingsQueryService(repositories, services.occurrenceResolver, fixedNow);
+
+    assert.equal((await query.list())[0].type, 'FUTURE_OCCURRENCE');
+    assert.equal((await query.list())[0].type, 'FUTURE_OCCURRENCE');
+
+    assert.deepEqual([...jobs.keys()], jobIds);
+    await jobs.get(jobIds[0])!();
+    assert.equal(publications, 1);
 });

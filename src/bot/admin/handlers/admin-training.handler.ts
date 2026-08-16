@@ -168,7 +168,7 @@ export class AdminTrainingHandler {
 
         if (callback.startsWith(AdminCallbacks.TrainingRepublishPrefix)) {
             const training = await this.publisher.republish(callback.slice(AdminCallbacks.TrainingRepublishPrefix.length));
-            await this.show(ctx, training.id);
+            await this.showTraining(ctx, training.id);
             return;
         }
 
@@ -185,7 +185,7 @@ export class AdminTrainingHandler {
                     ),
                 );
 
-            await this.show(ctx, training.id);
+            await this.showTraining(ctx, training.id);
             return;
         }
 
@@ -202,11 +202,11 @@ export class AdminTrainingHandler {
                     ),
                 );
 
-            await this.show(ctx, training.id);
+            await this.showTraining(ctx, training.id);
             return;
         }
 
-        await this.show(
+        await this.showTraining(
             ctx,
             callback.replace(
                 AdminCallbacks.TrainingPrefix,
@@ -265,7 +265,7 @@ export class AdminTrainingHandler {
         ].join('\n'), createArchivedTrainingsKeyboard(trainings, month));
     }
 
-    private async show(
+    async showTraining(
         ctx: Context,
         trainingId: string,
     ): Promise<void> {
@@ -332,7 +332,7 @@ export class AdminTrainingHandler {
                 trainingId,
             );
         this.cancellationScheduler?.cancel(changed.id);
-        await this.show(ctx, changed.id);
+        await this.showTraining(ctx, changed.id);
     }
 
     private async renderResolvedCard(training: Training, showAll = false): Promise<{ text: string; truncated: boolean }> {

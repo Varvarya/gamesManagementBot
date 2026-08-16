@@ -10,15 +10,25 @@ import { formatDay } from '../ui/admin-formatters';
 import { ScheduleExceptionReconciliationService } from '../../../domain/schedule-exceptions/schedule-exception-reconciliation.service';
 import { TemplateSchedulerService } from '../../../domain/templates/template-scheduler.service';
 import { TrainingCancellationScheduler } from '../../../scheduler/training-cancellation.scheduler';
+import { randomBytes } from 'node:crypto';
+import { UpcomingTrainingView, UpcomingTrainingsQueryService } from '../../../domain/trainings/upcoming-trainings-query.service';
+import { createUpcomingOccurrenceKeyboard, createUpcomingTrainingsKeyboard } from '../keyboards/upcoming-training.keyboard';
+import { AdminTrainingHandler } from './admin-training.handler';
+import { TrainingPublisherService } from '../../../domain/trainings/training-publisher.service';
 
 export class ScheduleExceptionHandler {
     readonly textStates: readonly AdminFlowState[] = ['waiting_exception_date', 'waiting_exception_value', 'waiting_exception_extra'];
-    constructor(private readonly services: ServicesContext, private readonly reconciliation?: ScheduleExceptionReconciliationService, private readonly scheduler?: TemplateSchedulerService, private readonly cancellationScheduler?: TrainingCancellationScheduler) {}
+    private readonly upcoming: UpcomingTrainingsQueryService;
+    private readonly upcomingTokens = new Map<string, UpcomingTrainingView>();
+    constructor(private readonly services: ServicesContext, private readonly reconciliation?: ScheduleExceptionReconciliationService, private readonly scheduler?: TemplateSchedulerService, private readonly cancellationScheduler?: TrainingCancellationScheduler, private readonly trainingAdmin?: AdminTrainingHandler, private readonly publisher?: TrainingPublisherService) {
+        this.upcoming = new UpcomingTrainingsQueryService(services.repositories, services.occurrenceResolver);
+    }
     canHandle(callback: string): boolean {
         return [AdminCallbacks.ScheduleExceptions, AdminCallbacks.ScheduleExceptionAdd, AdminCallbacks.ScheduleExceptionHistory,
             AdminCallbacks.ScheduleExceptionExtra, AdminCallbacks.ScheduleExceptionConfirm, AdminCallbacks.ScheduleExceptionDelete,
-            AdminCallbacks.ScheduleExceptionDeleteConfirm, AdminCallbacks.ScheduleExceptionRevertConfirm, AdminCallbacks.ScheduleUpcoming].includes(callback as never)
-            || [AdminCallbacks.ScheduleExceptionEntryPrefix, AdminCallbacks.ScheduleExceptionViewPrefix, AdminCallbacks.ScheduleExceptionActionPrefix, AdminCallbacks.ScheduleExceptionChatPrefix].some((prefix) => callback.startsWith(prefix));
+            AdminCallbacks.ScheduleExceptionDeleteConfirm, AdminCallbacks.ScheduleExceptionRevertConfirm, AdminCallbacks.ScheduleUpcoming, AdminCallbacks.ScheduleUpcomingMore].includes(callback as never)
+            || [AdminCallbacks.ScheduleExceptionEntryPrefix, AdminCallbacks.ScheduleExceptionViewPrefix, AdminCallbacks.ScheduleExceptionActionPrefix, AdminCallbacks.ScheduleExceptionChatPrefix,
+                AdminCallbacks.ScheduleUpcomingOpenPrefix, AdminCallbacks.ScheduleUpcomingPublishPrefix, AdminCallbacks.ScheduleUpcomingExceptionPrefix].some((prefix) => callback.startsWith(prefix));
     }
     canHandleText(adminId: number): boolean { return this.textStates.includes(this.services.adminFlow.getState(adminId)); }
 
@@ -43,7 +53,10 @@ export class ScheduleExceptionHandler {
         if (callback === AdminCallbacks.ScheduleExceptionDelete) { await this.confirmDelete(ctx, adminId); return; }
         if (callback === AdminCallbacks.ScheduleExceptionDeleteConfirm) { const id = this.services.adminFlow.getData(adminId).exceptionId; if (id) await this.services.scheduleExceptions.delete(id); this.services.adminFlow.finish(adminId); await this.showList(ctx); return; }
         if (callback === AdminCallbacks.ScheduleExceptionRevertConfirm) { await this.revertPublished(ctx, adminId); return; }
-        if (callback === AdminCallbacks.ScheduleUpcoming) await this.showUpcoming(ctx);
+        if (callback === AdminCallbacks.ScheduleUpcoming || callback === AdminCallbacks.ScheduleUpcomingMore) { await this.showUpcoming(ctx, callback === AdminCallbacks.ScheduleUpcomingMore); return; }
+        if (callback.startsWith(AdminCallbacks.ScheduleUpcomingOpenPrefix)) { await this.showUpcomingItem(ctx, callback.slice(AdminCallbacks.ScheduleUpcomingOpenPrefix.length)); return; }
+        if (callback.startsWith(AdminCallbacks.ScheduleUpcomingPublishPrefix)) { await this.publishUpcoming(ctx, callback.slice(AdminCallbacks.ScheduleUpcomingPublishPrefix.length)); return; }
+        if (callback.startsWith(AdminCallbacks.ScheduleUpcomingExceptionPrefix)) { await this.createUpcomingException(ctx, adminId, callback.slice(AdminCallbacks.ScheduleUpcomingExceptionPrefix.length)); return; }
     }
 
     async handleText(ctx: Context, text: string): Promise<void> {
@@ -118,7 +131,50 @@ export class ScheduleExceptionHandler {
     private async showException(ctx: Context, adminId: number, id: string): Promise<void> { const item = await this.services.scheduleExceptions.findById(id); if (!item) throw new Error('Виняток не знайдено.'); this.services.adminFlow.start(adminId, 'idle', { exceptionId: id, exceptionDate: item.date, exceptionEntryId: item.scheduleEntryId, pendingException: item }); await this.services.adminUi.show(ctx, renderPreview(item), createExceptionCardKeyboard()); }
     private async confirmDelete(ctx: Context, adminId: number): Promise<void> { const id = this.services.adminFlow.getData(adminId).exceptionId; if (!id) return; const item = await this.services.scheduleExceptions.findById(id); if (!item) return; const training = item.scheduleEntryId ? await this.services.repositories.trainings.findAnyByTemplateSlotAndDate(item.scheduleEntryId, item.date) : undefined; await this.services.adminUi.show(ctx, training?.messageId ? 'Тренування вже опубліковано. Повернути його до регулярного розкладу?' : 'Видалити виняток? Для цієї дати знову діятиме регулярний розклад.', createExceptionDeleteKeyboard(Boolean(training?.messageId && item.type !== 'extra'))); }
     private async revertPublished(ctx: Context, adminId: number): Promise<void> { const id = this.services.adminFlow.getData(adminId).exceptionId; if (!id || !this.reconciliation) return; const item = await this.services.scheduleExceptions.findById(id); if (!item) return; const result = await this.reconciliation.revert(item); await this.services.scheduleExceptions.delete(id); if (result.trainingId) { const training = await this.services.trainings.getRequired(result.trainingId); await this.cancellationScheduler?.schedule(training, { reconcileOverdue: false }); } this.services.adminFlow.finish(adminId); await this.showList(ctx); }
-    private async showUpcoming(ctx: Context): Promise<void> { const settings = await this.services.settings.get(); const today = getZonedNow(new Date(), settings.timezone).date; const templates = await this.services.repositories.templates.list(); const lines: string[] = []; for (let offset = 0; offset < 28 && lines.length < 12; offset++) { const date = addCalendarDays(today, offset); const weekday = new Date(`${date}T00:00:00Z`).getUTCDay() || 7; for (const template of templates) for (const slot of template.slots.filter((s) => s.dayOfWeek === weekday)) { const ex = await this.services.scheduleExceptions.findForOccurrence(slot.id, date); const occurrence = this.services.occurrenceResolver.resolveRecurring(template, slot, date, ex); lines.push(`${displayDate(date)} · ${occurrence ? `${occurrence.startTime} · ${occurrence.title}${ex ? ' ← змінено' : ''}` : `❌ ${template.title}`}`); } } for (const extra of (await this.services.scheduleExceptions.listUpcoming(today)).filter((e) => e.type === 'extra')) lines.push(`${displayDate(extra.date)} · ${extra.startTime} · ${extra.title} · додаткове`); await this.services.adminUi.show(ctx, ['👀 Найближчі тренування', '', ...(lines.length ? lines.sort().slice(0, 15) : ['Немає запланованих тренувань.'])].join('\n'), createFlowCancelKeyboard(AdminCallbacks.Schedule)); }
+    private async showUpcoming(ctx: Context, expanded = false): Promise<void> {
+        const settings = await this.services.settings.get();
+        const today = getZonedNow(new Date(), settings.timezone).date;
+        const items = await this.upcoming.list(expanded ? 28 : 7);
+        this.upcomingTokens.clear();
+        const tokenized = items.slice(0, expanded ? 30 : 12).map((item) => { const token = randomBytes(6).toString('base64url'); this.upcomingTokens.set(token, item); return { token, item }; });
+        await this.services.adminUi.show(ctx, renderUpcoming(items.slice(0, expanded ? 30 : 12), today), createUpcomingTrainingsKeyboard(tokenized, expanded));
+    }
+
+    private async showUpcomingItem(ctx: Context, token: string): Promise<void> {
+        const item = this.requireUpcoming(token);
+        await this.services.adminUi.show(ctx, renderUpcomingCard(item), createUpcomingOccurrenceKeyboard(token, item));
+    }
+
+    private async publishUpcoming(ctx: Context, token: string): Promise<void> {
+        const item = this.requireUpcoming(token);
+        if (!item.occurrence || !this.publisher) throw new Error('Це тренування не можна опублікувати.');
+        const occurrence = item.occurrence;
+        await this.publisher.publishTemplateSlot({
+            templateId: occurrence.scheduleId ?? `exception:${occurrence.exceptionId}`,
+            slotId: occurrence.scheduleEntryId ?? 'extra', clubId: occurrence.clubId, chatId: occurrence.chatId,
+            title: occurrence.title, location: occurrence.location, date: occurrence.date, startTime: occurrence.startTime,
+            endTime: occurrence.endTime, placesLimit: occurrence.placesLimit, minPlayers: occurrence.minPlayers,
+            cancelCheckHoursBefore: occurrence.cancelCheckHoursBefore,
+        });
+        const training = item.scheduleId && item.scheduleEntryId
+            ? await this.services.repositories.trainings.findByTemplateSlotAndDate({ templateId: item.scheduleId, templateSlotId: item.scheduleEntryId, date: item.date })
+            : item.exceptionId ? await this.services.repositories.trainings.findByTemplateSlotAndDate({ templateId: `exception:${item.exceptionId}`, templateSlotId: 'extra', date: item.date }) : undefined;
+        if (training && this.trainingAdmin) { await this.trainingAdmin.showTraining(ctx, training.id); return; }
+        await this.showUpcoming(ctx);
+    }
+
+    private async createUpcomingException(ctx: Context, adminId: number, token: string): Promise<void> {
+        const item = this.requireUpcoming(token);
+        if (!item.scheduleEntryId) throw new Error('Для цього тренування виняток недоступний.');
+        this.services.adminFlow.start(adminId, 'idle', { exceptionDate: item.date, exceptionEntryId: item.scheduleEntryId, exceptionId: item.exceptionId });
+        await this.showActions(ctx);
+    }
+
+    private requireUpcoming(token: string): UpcomingTrainingView {
+        const item = this.upcomingTokens.get(token);
+        if (!item) throw new Error('Цей список уже неактуальний. Відкрийте найближчі тренування ще раз.');
+        return item;
+    }
     private async base(entryId: string) { const templates = await this.services.repositories.templates.list(); const template = templates.find((t) => t.slots.some((s) => s.id === entryId)); const slot = template?.slots.find((s) => s.id === entryId); if (!template || !slot) throw new Error('Запис розкладу більше не існує.'); return { template, slot }; }
     private async today(): Promise<string> { return getZonedNow(new Date(), (await this.services.settings.get()).timezone).date; }
     private async parseDate(value: string): Promise<string> { const short = value.trim().match(/^(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?$/); const year = short?.[3] ?? (await this.today()).slice(0, 4); const result = short ? `${year}-${short[2].padStart(2, '0')}-${short[1].padStart(2, '0')}` : value.trim(); if (!/^\d{4}-\d{2}-\d{2}$/.test(result) || Number.isNaN(Date.parse(`${result}T00:00:00Z`))) throw new Error('Введіть коректну дату, наприклад 18.08 або 2026-08-18.'); return result; }
@@ -131,3 +187,45 @@ function nonNegative(value: string): number { const n = Number(value.trim()); if
 function parseMultiple(text: string): Partial<ScheduleException> { const result: Partial<ScheduleException> = {}; for (const line of text.split('\n')) { const [rawKey, ...rest] = line.split(':'); const value = rest.join(':').trim(); const key = rawKey.trim().toLocaleLowerCase('uk'); if (key === 'час') [result.startTime, result.endTime] = parseRange(value); else if (key === 'місця') result.placesLimit = positive(value); else if (key === 'мінімум') result.minPlayers = nonNegative(value); else if (key === 'публікація') result.publishTime = validTime(value); } if (!Object.keys(result).length) throw new Error('Не знайдено змін.'); return result; }
 function displayDate(date: string): string { const [year, month, day] = date.split('-'); return `${day}.${month}.${year}`; }
 function renderPreview(item: Partial<ScheduleException>): string { return ['📌 Виняток', '', item.title, item.date ? displayDate(item.date) : undefined, item.type === 'cancel' ? '❌ Скасувати цю дату' : item.type === 'extra' ? '➕ Додаткове тренування' : '📌 Зміна одного тренування', item.startTime ? `🕒 ${item.startTime}–${item.endTime}` : undefined, item.placesLimit !== undefined ? `👥 Місць: ${item.placesLimit}` : undefined, item.minPlayers !== undefined ? `🎯 Мінімум: ${item.minPlayers}` : undefined, item.publicationEnabled === false ? '📤 Публікація: вручну' : item.publishDaysBefore === 0 && item.publicationEnabled ? '📤 Публікація: зараз' : item.publishTime ? `📤 Публікація: ${item.publishTime}` : undefined, '', 'Регулярний розклад не зміниться.'].filter(Boolean).join('\n'); }
+
+function renderUpcoming(items: UpcomingTrainingView[], today: string): string {
+    if (!items.length) return '👀 Найближчі тренування\n\nНемає запланованих тренувань.';
+    const lines = ['👀 Найближчі тренування', ''];
+    let currentDate = '';
+    for (const item of items) {
+        if (item.date !== currentDate) { currentDate = item.date; lines.push(upcomingDateTitle(item.date, today), ''); }
+        lines.push(`${item.startTime}–${item.endTime} · ${item.title}`, upcomingStatus(item), '');
+    }
+    return lines.join('\n').trim();
+}
+
+function renderUpcomingCard(item: UpcomingTrainingView): string {
+    const lines = [`${item.type === 'MISSED_PUBLICATION' ? '⚠️' : item.type === 'PAUSED_SCHEDULE' ? '⏸' : item.type === 'CANCELLED' ? '🔴' : '🕓'} ${item.title}`,
+        `${displayDate(item.date)} · ${item.startTime}–${item.endTime}`, '', upcomingStatus(item)];
+    if (item.type === 'FUTURE_OCCURRENCE') lines.push('', 'Ще не опубліковано.');
+    if (item.publicationDate && item.publicationTime) lines.push('', `📤 Запис відкриється:\n${displayDate(item.publicationDate)} о ${item.publicationTime}`);
+    if (item.chatTitle) lines.push('', `💬 Чат:\n${item.chatTitle}`);
+    return lines.join('\n');
+}
+
+function upcomingStatus(item: UpcomingTrainingView): string {
+    if (item.type === 'PAUSED_SCHEDULE') return '⏸ Розклад на паузі';
+    if (item.type === 'CANCELLED') return '🔴 Скасовано';
+    if (item.type === 'MISSED_PUBLICATION') return `⚠️ Не опубліковано${item.publicationDate && item.publicationTime ? `\nМало відкритися: ${displayDate(item.publicationDate)} о ${item.publicationTime}` : ''}`;
+    if (item.type === 'FUTURE_OCCURRENCE') return item.publicationDate && item.publicationTime
+        ? `🕓 Запис відкриється ${displayDate(item.publicationDate)} о ${item.publicationTime}` : '🕓 Ще не опубліковано';
+    if (item.training?.status === 'open') return `🟢 Запис відкрито · ${item.registeredPlaces ?? 0}/${item.placesLimit}`;
+    if (item.training?.status === 'closed') return `🔒 Запис закрито · ${item.registeredPlaces ?? 0}/${item.placesLimit}`;
+    return `⚠️ Не опубліковано · ${item.registeredPlaces ?? 0}/${item.placesLimit}`;
+}
+
+function upcomingDateTitle(date: string, today: string): string {
+    if (date === today) return `Сьогодні, ${ukrainianDate(date)}`;
+    if (date === addCalendarDays(today, 1)) return `Завтра, ${ukrainianDate(date)}`;
+    const weekday = new Intl.DateTimeFormat('uk-UA', { weekday: 'long', timeZone: 'UTC' }).format(new Date(`${date}T00:00:00Z`));
+    return `${weekday[0].toLocaleUpperCase('uk')}${weekday.slice(1)}, ${ukrainianDate(date)}`;
+}
+
+function ukrainianDate(date: string): string {
+    return new Intl.DateTimeFormat('uk-UA', { day: 'numeric', month: 'long', timeZone: 'UTC' }).format(new Date(`${date}T00:00:00Z`));
+}
