@@ -323,6 +323,10 @@ export class TrainingPublisherService {
          * - повторного спрацювання job.
          */
         if (existing) {
+            if (existing.status === 'draft' && !existing.messageId) {
+                logger.info('scheduler.training_reused', { trainingId: existing.id, templateId: input.templateId, slotId: input.slotId, date: input.date, status: existing.status });
+                return this.publishDraft(existing);
+            }
             logger.info('publication.duplicate_skipped', { trainingId: existing.id, templateId: input.templateId, slotId: input.slotId, date: input.date });
             return existing;
         }
@@ -363,6 +367,8 @@ export class TrainingPublisherService {
 
                 cancelCheckHoursBefore: input.cancelCheckHoursBefore,
             });
+
+        logger.info('scheduler.training_created', { trainingId: training.id, clubId: input.clubId, templateId: input.templateId, slotId: input.slotId, date: input.date });
 
         return this.publishDraft(
             training,

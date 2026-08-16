@@ -71,18 +71,23 @@ export class TemplateSchedulerService {
         await this.templates.delete(templateId);
     }
 
-    async restore(templates: TrainingTemplate[]): Promise<number> {
+    async restore(templates: TrainingTemplate[], options: { reconcileMissed?: boolean } = {}): Promise<number> {
         this.scheduler.cancelAll();
 
         for (const template of templates) {
-            // Restoring recurring jobs is non-destructive. Missed publications
-            // need an explicit reconciliation decision and are not replayed here.
-            await this.syncTemplate(template, false);
+            await this.syncTemplate(template, options.reconcileMissed ?? false);
         }
         await this.syncExceptionJobs(templates);
 
+        const snapshot = this.scheduler.getJobsSnapshot();
+        logger.info('scheduler.jobs_snapshot', {
+            clubId: templates[0]?.clubId ?? (await this.settings.get()).clubId,
+            jobIds: snapshot.map((job) => job.jobId),
+            nextRunAt: snapshot.map((job) => ({ jobId: job.jobId, nextRunAt: job.nextRunAt })),
+        });
+
         return this.scheduler.getScheduledTemplateIds()
-            .filter(id => id.startsWith('club:'))
+            .filter(id => id.startsWith('club:') && id.includes(':template:'))
             .length;
     }
 
@@ -125,6 +130,18 @@ export class TemplateSchedulerService {
         const resolved = resolveTemplateSlot(template, slot);
         const jobId = this.getSlotJobId(template.clubId, template.id, slot.id);
 
+        logger.info('scheduler.slot_registering', {
+            clubId: template.clubId,
+            templateId: template.id,
+            slotId: slot.id,
+            dayOfWeek: resolved.dayOfWeek,
+            trainingStartTime: resolved.startTime,
+            publishRule: { daysBefore: resolved.publishDaysBefore },
+            publishTime: resolved.publishTime,
+            timezone,
+            jobId,
+        });
+
         this.scheduler.rescheduleTemplate(
             {
                 id: jobId,
@@ -156,9 +173,11 @@ export class TemplateSchedulerService {
                         currentResolved.publishDaysBefore,
                     );
 
+                    logger.info('scheduler.occurrence_resolved', { clubId: currentTemplate.clubId, templateId: currentTemplate.id, slotId: currentSlot.id, trainingDate });
                     await this.publishSlot(currentTemplate, currentSlot, trainingDate);
                 } catch (error) {
-                    logger.error('scheduler.automatic_publication_failed', { jobId, templateId: template.id, slotId: slot.id, error });
+                    logger.error('scheduler.automatic_publication_failed', { jobId, clubId: template.clubId, templateId: template.id, slotId: slot.id, stage: 'occurrence_or_publication', error });
+                    throw error;
                 }
             },
         );
@@ -214,13 +233,15 @@ export class TemplateSchedulerService {
         if (!chat?.enabled) {
             throw new Error(`Schedule publication chat ${occurrence.chatId} is missing or disabled`);
         }
-        await this.publisher.publishTemplateSlot({
+        logger.info('publication.send_started', { clubId: occurrence.clubId, templateId: occurrence.scheduleId, slotId: occurrence.scheduleEntryId, date: occurrence.date, chatId: occurrence.chatId });
+        const training = await this.publisher.publishTemplateSlot({
             templateId: occurrence.scheduleId ?? `exception:${occurrence.exceptionId}`,
             slotId: occurrence.scheduleEntryId ?? 'extra', clubId: occurrence.clubId, chatId: occurrence.chatId,
             title: occurrence.title, location: occurrence.location, date: occurrence.date, startTime: occurrence.startTime,
             endTime: occurrence.endTime, placesLimit: occurrence.placesLimit, minPlayers: occurrence.minPlayers,
             cancelCheckHoursBefore: occurrence.cancelCheckHoursBefore,
         });
+        logger.info('publication.send_completed', { clubId: occurrence.clubId, trainingId: training.id, templateId: occurrence.scheduleId, slotId: occurrence.scheduleEntryId, date: occurrence.date, chatId: occurrence.chatId, messageId: training.messageId, reused: training.status !== 'draft' });
     }
 
     async syncExceptionJobs(currentTemplates?: TrainingTemplate[]): Promise<void> {
@@ -228,6 +249,7 @@ export class TemplateSchedulerService {
         const settings = await this.settings.get();
         const templates = currentTemplates ?? await this.templates.listByClubId(settings.clubId);
         const { timezone } = settings;
+        const zonedNow = getZonedNow(this.now(), timezone);
         this.scheduler.cancelByPrefix(`club:${templates[0]?.clubId ?? settings.clubId}:exception:`);
         const byEntry = new Map(templates.flatMap((template) => template.slots.map((slot) => [slot.id, { template, slot }] as const)));
         for (const exception of await this.exceptions.list()) {
@@ -240,6 +262,18 @@ export class TemplateSchedulerService {
             if (exception.type === 'override' && occurrence.publishTime === basePublishTime) continue;
             const publicationDate = addCalendarDays(occurrence.date, -occurrence.publishDaysBefore);
             const jobId = this.getExceptionJobId(exception);
+            const publicationAlreadyDue = publicationDate < zonedNow.date
+                || (publicationDate === zonedNow.date && occurrence.publishTime <= zonedNow.time);
+            const trainingStillFuture = occurrence.date > zonedNow.date
+                || (occurrence.date === zonedNow.date && occurrence.startTime > zonedNow.time);
+            if (publicationAlreadyDue && trainingStillFuture) {
+                try {
+                    await this.publishOccurrence(occurrence);
+                } catch (error) {
+                    logger.error('scheduler.missed_publication_failed', { jobId, clubId: occurrence.clubId, templateId: occurrence.scheduleId, slotId: occurrence.scheduleEntryId, stage: 'exception_recovery', error });
+                }
+                continue;
+            }
             this.scheduler.rescheduleOneOff({ id: jobId, date: publicationDate, time: occurrence.publishTime, timezone }, async () => {
                 const latest = await this.exceptions!.findById(exception.id); if (!latest) return;
                 const current = latest.type === 'extra' ? this.occurrenceResolver.resolveExtra(latest) : latest.scheduleEntryId && byEntry.get(latest.scheduleEntryId)

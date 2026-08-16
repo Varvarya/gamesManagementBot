@@ -292,12 +292,12 @@ export class ApplicationContext {
             try {
                 const runtime = await this.getClubRuntime(club.id);
                 const templates = await runtime.context.repositories.templates.listEnabled();
-                const restoredJobCount = await runtime.templateScheduler.restore(templates);
+                const restoredJobCount = await runtime.templateScheduler.restore(templates, { reconcileMissed: true });
                 totalRestoredJobCount += restoredJobCount;
                 await runtime.cancellationScheduler.restore({ reconcileOverdue: false });
                 const expectedJobCount = templates.reduce((count, template) => count + template.slots.filter((slot) => slot.enabled).length, 0);
                 await this.clubs.recordSchedulerRestore(club.id, expectedJobCount, restoredJobCount);
-                logger.info('scheduler.restore_completed', { clubId: club.id, restoredJobCount });
+                logger.info('scheduler.club_restore_completed', { clubId: club.id, jobCount: restoredJobCount });
             } catch (error) {
                 logger.error('scheduler.restore_failed', { clubId: club.id, reason: error instanceof Error ? error.message : String(error) });
             }

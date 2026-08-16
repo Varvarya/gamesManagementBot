@@ -36,15 +36,18 @@ export class SchedulerService {
             schedule.scheduleJob(
                 rule,
                 async () => {
+                    logger.info('scheduler.job_started', { jobId: template.id });
                     try {
                         await onPublish();
+                        logger.info('scheduler.job_completed', { jobId: template.id });
                     } catch (error) {
-                        logger.error('scheduler.job_failed', { jobId: template.id, error });
+                        logger.error('scheduler.job_failed', { jobId: template.id, stage: 'execute', error });
                     }
                 },
             );
 
         if (!job) {
+            logger.error('scheduler.job_registration_failed', { jobId: template.id, dayOfWeek: template.dayOfWeek, publishTime: template.publishTime, timezone: template.timezone, jobRegistered: false });
             throw new Error(
                 `Failed to schedule job: ${template.id}`,
             );
@@ -54,7 +57,7 @@ export class SchedulerService {
             template.id,
             job,
         );
-        logger.info('scheduler.job_scheduled', { jobId: template.id, dayOfWeek: template.dayOfWeek, publishTime: template.publishTime, timezone: template.timezone });
+        logger.info('scheduler.job_scheduled', { jobId: template.id, dayOfWeek: template.dayOfWeek, publishTime: template.publishTime, timezone: template.timezone, computedNextPublishAt: job.nextInvocation()?.toISOString(), jobRegistered: true });
     }
 
     rescheduleOneOff(input: SchedulerOneOff, onPublish: SchedulerPublishHandler): void {
@@ -63,10 +66,23 @@ export class SchedulerService {
         const [hour, minute] = this.parseTime(input.time);
         const rule = new schedule.RecurrenceRule();
         rule.year = year; rule.month = month - 1; rule.date = day; rule.hour = hour; rule.minute = minute; rule.second = 0; rule.tz = input.timezone;
-        const job = schedule.scheduleJob(rule, async () => { try { await onPublish(); } catch (error) { logger.error('scheduler.job_failed', { jobId: input.id, error }); } finally { this.jobs.delete(input.id); } });
-        if (!job) return; // Past one-off jobs are reconciled explicitly and never replayed on restore.
+        const job = schedule.scheduleJob(rule, async () => {
+            logger.info('scheduler.job_started', { jobId: input.id });
+            try {
+                await onPublish();
+                logger.info('scheduler.job_completed', { jobId: input.id });
+            } catch (error) {
+                logger.error('scheduler.job_failed', { jobId: input.id, stage: 'execute', error });
+            } finally {
+                this.jobs.delete(input.id);
+            }
+        });
+        if (!job) {
+            logger.info('scheduler.one_off_not_registered', { jobId: input.id, date: input.date, time: input.time, timezone: input.timezone, jobRegistered: false, reason: 'past_due' });
+            return; // Past one-off jobs are reconciled explicitly and never replayed on restore.
+        }
         this.jobs.set(input.id, job);
-        logger.info('scheduler.one_off_scheduled', { jobId: input.id, date: input.date, time: input.time, timezone: input.timezone });
+        logger.info('scheduler.one_off_scheduled', { jobId: input.id, date: input.date, time: input.time, timezone: input.timezone, computedNextPublishAt: job.nextInvocation()?.toISOString(), jobRegistered: true });
     }
 
     cancelTemplate(
@@ -128,6 +144,13 @@ export class SchedulerService {
         return [
             ...this.jobs.keys(),
         ];
+    }
+
+    getJobsSnapshot(): Array<{ jobId: string; nextRunAt?: string }> {
+        return [...this.jobs].map(([jobId, job]) => ({
+            jobId,
+            nextRunAt: job.nextInvocation()?.toISOString(),
+        }));
     }
 
     private createRule(
