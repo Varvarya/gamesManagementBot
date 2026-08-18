@@ -19,3 +19,4 @@ yarn-error.log*
 !src/domain/telegram-import/telegram-auth-error.test.ts
 !src/domain/telegram-import/telegram-qr-auth.test.ts
 !src/bot/admin/handlers/telegram-import-source-selection.test.ts
+!src/bot/handlers/group-registration.handler.test.ts

@@ -4,7 +4,8 @@ import { ServicesContext } from '../../app/services.context';
 import { TrainingPublisherService } from '../../domain/trainings/training-publisher.service';
 import { logger } from '../../utils/logger';
 import { registrationCommandParser, RegistrationCommand, RegistrationCommandParseError } from '../../domain/trainings/registration-command.parser';
-import { PendingRegistrationSelectionStore, REGISTRATION_SELECTION_PREFIX } from '../registration/pending-registration-selection.store';
+import { PendingRegistrationSelectionStore, REGISTRATION_SELECTION_CANCEL_PREFIX, REGISTRATION_SELECTION_PREFIX } from '../registration/pending-registration-selection.store';
+import { RegistrationMessageCleanup } from '../registration/registration-message-cleanup';
 import { assertCallbackDataValid } from '../callback-data';
 import { Training } from '../../domain/trainings/training.types';
 
@@ -16,6 +17,7 @@ export class GroupRegistrationHandler {
         private readonly services: ServicesContext,
         private readonly publisher: TrainingPublisherService,
         private readonly selections: PendingRegistrationSelectionStore = new PendingRegistrationSelectionStore(),
+        private readonly cleanup: RegistrationMessageCleanup = new RegistrationMessageCleanup(),
     ) {}
 
     async handle(
@@ -111,11 +113,7 @@ export class GroupRegistrationHandler {
                 },
             );
 
-            await ctx.reply(
-                this.errorFeedback(
-                    error,
-                ),
-            );
+            await this.cleanup.sendTemporary(ctx, this.errorFeedback(error));
         }
     }
 
@@ -135,6 +133,12 @@ export class GroupRegistrationHandler {
             await ctx.answerCbQuery('⚠️ Цей вибір уже неактуальний. Надішліть команду ще раз.', { show_alert: true });
             return;
         }
+        if (callback.startsWith(REGISTRATION_SELECTION_CANCEL_PREFIX)) {
+            this.selections.complete(pending.requestId);
+            await this.cleanup.deletePrompt(ctx, pending.clubId, pending.chatId, pending.telegramUser.id);
+            await ctx.answerCbQuery('Вибір скасовано.');
+            return;
+        }
         try {
             const input = { telegramUser: pending.telegramUser, chatId: pending.chatId, command: pending.command };
             const results = await this.services.registration.executeCommandAgainstTraining(input, pending.trainingId);
@@ -142,9 +146,10 @@ export class GroupRegistrationHandler {
             if (training) await this.publisher.refreshMessage(training.id);
             this.selections.complete(pending.requestId);
             await ctx.answerCbQuery();
-            await ctx.deleteMessage().catch(() => undefined);
+            await this.cleanup.deletePrompt(ctx, pending.clubId, pending.chatId, pending.telegramUser.id);
         } catch (error) {
             this.selections.complete(pending.requestId);
+            await this.cleanup.deletePrompt(ctx, pending.clubId, pending.chatId, pending.telegramUser.id);
             await ctx.answerCbQuery(this.errorFeedback(error), { show_alert: true });
         }
     }
@@ -165,7 +170,10 @@ export class GroupRegistrationHandler {
             const callback = assertCallbackDataValid(`${REGISTRATION_SELECTION_PREFIX}${pending[index].token}`);
             return [Markup.button.callback(this.trainingLabel(training, trainings), callback)];
         });
-        await ctx.reply('🏸 Оберіть тренування:', Markup.inlineKeyboard(rows));
+        const cancel = assertCallbackDataValid(`${REGISTRATION_SELECTION_CANCEL_PREFIX}${pending[0].token}`);
+        rows.push([Markup.button.callback('❌ Скасувати', cancel)]);
+        const message = await ctx.reply('🏸 Оберіть тренування:', Markup.inlineKeyboard(rows));
+        await this.cleanup.trackPrompt(ctx, this.services.repositories.clubId, input.chatId, input.telegramUser.id, message.message_id);
     }
 
     private trainingLabel(training: Training, candidates: Training[]): string {

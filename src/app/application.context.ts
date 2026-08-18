@@ -47,7 +47,7 @@ import { AdminNavigationService } from '../bot/navigation/admin-navigation.servi
 import { ClubContextManager, ClubRuntimeContext } from './club-context-manager';
 import { AdminUi } from '../bot/admin/ui/admin-ui';
 import { AdminFlowService } from '../bot/admin/flows/admin-flow.service';
-import { PendingRegistrationSelectionStore, REGISTRATION_SELECTION_PREFIX } from '../bot/registration/pending-registration-selection.store';
+import { PendingRegistrationSelectionStore, REGISTRATION_SELECTION_CANCEL_PREFIX, REGISTRATION_SELECTION_PREFIX } from '../bot/registration/pending-registration-selection.store';
 import { PlayerDataHandler } from '../bot/admin/handlers/player-data.handler';
 import { ClubDiagnosticsService } from '../domain/clubs/club-diagnostics.service';
 import { TelegramUserConnectionManager } from '../domain/telegram-import/telegram-user-connection.manager';
@@ -235,7 +235,7 @@ export class ApplicationContext {
             'callback_query',
             async (ctx) => {
                 const callback = 'data' in ctx.callbackQuery ? ctx.callbackQuery.data : '';
-                if (callback.startsWith(REGISTRATION_SELECTION_PREFIX)) {
+                if (callback.startsWith(REGISTRATION_SELECTION_PREFIX) || callback.startsWith(REGISTRATION_SELECTION_CANCEL_PREFIX)) {
                     const clubId = this.registrationSelections.clubIdFor(callback);
                     if (!clubId) {
                         await ctx.answerCbQuery('⚠️ Цей вибір уже неактуальний. Надішліть команду ще раз.', { show_alert: true });

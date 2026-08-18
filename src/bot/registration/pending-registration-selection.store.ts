@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { RegistrationCommand } from '../../domain/trainings/registration-command.parser';
 
 export const REGISTRATION_SELECTION_PREFIX = 'reg:t:';
+export const REGISTRATION_SELECTION_CANCEL_PREFIX = 'reg:c:';
 
 export type PendingRegistrationSelection = {
     requestId: string;
@@ -22,6 +23,13 @@ export class PendingRegistrationSelectionStore {
 
     create(input: Omit<PendingRegistrationSelection, 'requestId' | 'token' | 'createdAt' | 'expiresAt' | 'trainingId'>): PendingRegistrationSelection[] {
         this.prune();
+        const superseded = new Set<string>();
+        for (const value of this.values.values()) {
+            if (value.clubId === input.clubId && value.chatId === input.chatId && value.telegramUser.id === input.telegramUser.id) {
+                superseded.add(value.requestId);
+            }
+        }
+        for (const requestId of superseded) this.complete(requestId);
         const requestId = this.shortToken();
         const now = Date.now();
         return input.candidateTrainingIds.map((trainingId) => {
@@ -35,7 +43,11 @@ export class PendingRegistrationSelectionStore {
     }
 
     get(callback: string): { status: 'active'; value: PendingRegistrationSelection } | { status: 'expired' | 'missing' } {
-        const token = callback.startsWith(REGISTRATION_SELECTION_PREFIX) ? callback.slice(REGISTRATION_SELECTION_PREFIX.length) : callback;
+        const token = callback.startsWith(REGISTRATION_SELECTION_PREFIX)
+            ? callback.slice(REGISTRATION_SELECTION_PREFIX.length)
+            : callback.startsWith(REGISTRATION_SELECTION_CANCEL_PREFIX)
+                ? callback.slice(REGISTRATION_SELECTION_CANCEL_PREFIX.length)
+                : callback;
         const value = this.values.get(token);
         if (!value) return { status: 'missing' };
         if (value.expiresAt <= Date.now()) {
