@@ -70,6 +70,7 @@ export class ServicesContext {
                 this.players,
                 this.trainings,
                 this.trainingParticipants,
+                async () => (await repositories.settings.get()).timezone,
             );
 
         this.templates =

@@ -27,6 +27,7 @@ export class RegistrationService {
         private readonly players: PlayerService,
         private readonly trainings: TrainingService,
         private readonly participants: TrainingParticipantsService,
+        private readonly timezone: () => Promise<string> = async () => 'Europe/Kyiv',
     ) {}
 
     async executeCommand(input: ExecuteRegistrationCommandInput): Promise<ParticipantMutation[]> {
@@ -46,7 +47,8 @@ export class RegistrationService {
         if (input.command.operation === 'remove') candidates = await this.filterRemovableCandidates(candidates, input);
         const hint = input.command.trainingHint;
         if (hint) {
-            const hinted = candidates.filter((training) => matchesTrainingHint(training, hint));
+            const timezone = await this.timezone();
+            const hinted = candidates.filter((training) => matchesTrainingHint(training, hint, timezone));
             if (hinted.length === 1) return { kind: 'ready', training: hinted[0] };
             if (hinted.length > 1) candidates = hinted;
             // A convenience hint that matches nothing must not turn numeric text
@@ -168,13 +170,11 @@ export class RegistrationService {
     }
 }
 
-function matchesTrainingHint(training: Training, hint: NonNullable<RegistrationCommand['trainingHint']>): boolean {
+function matchesTrainingHint(training: Training, hint: NonNullable<RegistrationCommand['trainingHint']>, timezone: string): boolean {
     if (hint.time && training.startTime !== hint.time) return false;
     if (hint.endTime && training.endTime !== hint.endTime) return false;
     if (hint.naturalDate) {
-        const date = new Date();
-        if (hint.naturalDate === 'tomorrow') date.setUTCDate(date.getUTCDate() + 1);
-        if (training.date !== dateInKyiv(date)) return false;
+        if (training.date !== relativeDateInTimezone(new Date(), hint.naturalDate, timezone)) return false;
     }
     if (hint.date) {
         if (/^\d{4}-/.test(hint.date) && training.date !== hint.date) return false;
@@ -186,8 +186,10 @@ function matchesTrainingHint(training: Training, hint: NonNullable<RegistrationC
     return true;
 }
 
-function dateInKyiv(value: Date): string {
-    const parts = new Intl.DateTimeFormat('en', { timeZone: 'Europe/Kyiv', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(value);
+function relativeDateInTimezone(value: Date, relative: 'today' | 'tomorrow', timezone: string): string {
+    const parts = new Intl.DateTimeFormat('en', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(value);
     const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value ?? '';
-    return `${part('year')}-${part('month')}-${part('day')}`;
+    const local = new Date(Date.UTC(Number(part('year')), Number(part('month')) - 1, Number(part('day'))));
+    if (relative === 'tomorrow') local.setUTCDate(local.getUTCDate() + 1);
+    return `${local.getUTCFullYear()}-${String(local.getUTCMonth() + 1).padStart(2, '0')}-${String(local.getUTCDate()).padStart(2, '0')}`;
 }

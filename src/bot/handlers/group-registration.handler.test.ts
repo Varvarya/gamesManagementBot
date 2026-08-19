@@ -71,10 +71,10 @@ test('invalid +5 warning is deleted after TTL and the training card is never tar
 test('invalid unregistration quantity and another parse warning are temporary', async () => {
     const h = createHarness();
     await h.handler.handle(h.messageContext('-5', 1, 201));
-    await h.handler.handle(h.messageContext('+1 ab', 1, 202));
+    await h.handler.handle(h.messageContext('+2 Арсений, Александр, Вася', 1, 202));
     await waitForTimers();
     assert.equal(h.replies[0].text, 'Можна додати або зняти від 1 до 4 місць.');
-    assert.equal(h.replies[1].text, 'Не вдалося розпізнати імʼя або тренування. Уточніть команду.');
+    assert.equal(h.replies[1].text, 'Вказано 2 місця, але знайдено 3 імені.');
     assert.deepEqual(h.deleted.map((item) => item.messageId), h.replies.map((item) => item.messageId));
 });
 

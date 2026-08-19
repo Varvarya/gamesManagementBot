@@ -8,6 +8,8 @@ import { PendingRegistrationSelectionStore, REGISTRATION_SELECTION_CANCEL_PREFIX
 import { RegistrationMessageCleanup } from '../registration/registration-message-cleanup';
 import { assertCallbackDataValid } from '../callback-data';
 import { Training } from '../../domain/trainings/training.types';
+import { ProcessedRegistrationMessageStore } from '../../domain/trainings/processed-registration-message.store';
+import { RegistrationResolution } from '../../domain/trainings/registration.service';
 
 export class GroupRegistrationHandler {
     private readonly handledUpdates =
@@ -18,6 +20,7 @@ export class GroupRegistrationHandler {
         private readonly publisher: TrainingPublisherService,
         private readonly selections: PendingRegistrationSelectionStore = new PendingRegistrationSelectionStore(),
         private readonly cleanup: RegistrationMessageCleanup = new RegistrationMessageCleanup(),
+        private readonly processed?: ProcessedRegistrationMessageStore,
     ) {}
 
     async handle(
@@ -35,7 +38,7 @@ export class GroupRegistrationHandler {
             return;
         }
 
-        if (!registrationCommandParser.normalize(message.text).match(/^[+-]/)) {
+        if (!registrationCommandParser.hasOperation(message.text)) {
             return;
         }
 
@@ -91,15 +94,23 @@ export class GroupRegistrationHandler {
                 chatId: message.chat.id, replyToMessageId,
                 date: command.date, startTime: command.startTime, command,
             };
-            const resolution = await this.services.registration.resolveCommand(input);
-            if (resolution.kind === 'none') throw new Error(resolution.reason);
+            const execute = async () => {
+                const resolution = await this.services.registration.resolveCommand(input);
+                if (resolution.kind === 'none') throw new Error(resolution.reason);
+                if (resolution.kind === 'select') return { value: resolution, status: 'pending_ambiguity' as const };
+                await this.services.registration.executeCommandAgainstTraining(input, resolution.training.id);
+                return { value: resolution, trainingId: resolution.training.id };
+            };
+            const processed = this.processed
+                ? await this.processed.processOnce<Exclude<RegistrationResolution, { kind: 'none' }>>(message.chat.id, message.message_id, execute)
+                : { duplicate: false as const, value: (await execute()).value };
+            if (processed.duplicate) return;
+            const resolution = processed.value;
             if (resolution.kind === 'select') {
                 await this.showTrainingSelector(ctx, input, resolution.trainings);
                 return;
             }
-            const results = await this.services.registration.executeCommandAgainstTraining(input, resolution.training.id);
-            const training = results[0]?.training;
-            if (training) await this.publisher.refreshMessage(training.id);
+            await this.publisher.refreshMessage(resolution.training.id);
         } catch (error) {
             logger.warn(
                 'registration.action_rejected',

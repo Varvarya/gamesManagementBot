@@ -20,112 +20,208 @@ export type RegistrationCommand = {
     trainingHint?: TrainingHint;
     date?: string;
     startTime?: string;
+    hasExplicitDate: boolean;
+    hasExplicitTime: boolean;
 };
 
 export class RegistrationCommandParseError extends Error {}
+
+type ExtractedAction = { sign: '+' | '-'; count: number; remaining: string };
+type NumericAction = { sign: '+' | '-'; countToken: string; start: number; length: number };
+type TextExtraction<T> = { value?: T; remaining: string };
+
+const RELATIVE_DAYS: Record<string, 'today' | 'tomorrow'> = {
+    'сьогодні': 'today',
+    'сегодня': 'today',
+    'завтра': 'tomorrow',
+};
+
+const STOP_WORDS = [
+    'будь ласка', 'пожалуйста', 'дякую', 'спасибо', 'пліз', 'плиз', 'прошу',
+    'на', 'о', 'об', 'в', 'у', 'до', 'для', 'at',
+    'мене', 'меня', 'собі', 'себе', 'я',
+    'хочу', 'можна', 'запишіть', 'запишите', 'запиши', 'додайте', 'добавьте',
+];
 
 export class RegistrationCommandParser {
     normalize(text: string): string {
         return text.replace(/[−–—]/g, '-').trim().replace(/\s+/g, ' ');
     }
 
+    hasOperation(text: string): boolean {
+        const normalized = this.normalize(text);
+        return this.findNumericAction(normalized) !== undefined || /^[+-](?:\s|\p{L}|$)/u.test(normalized);
+    }
+
     parse(text: string): RegistrationCommand | undefined {
         const normalized = this.normalize(text);
-        const sign = normalized[0];
-        if (sign !== '+' && sign !== '-') return undefined;
-        const operation = sign === '+' ? 'add' : 'remove';
-        let body = normalized.slice(1).trim();
-        let count = 1;
-
-        const numeric = body.match(/^(\d+)(?:\s+(.*))?$/u);
-        if (numeric) {
-            count = Number(numeric[1]);
-            body = numeric[2]?.trim() ?? '';
-        } else if (operation === 'add') {
+        const extractedAction = this.extractOperationAndCount(normalized);
+        if (!extractedAction) return undefined;
+        if (!isValidReservedPlaces(extractedAction.count)) {
             throw new RegistrationCommandParseError('Можна додати або зняти від 1 до 4 місць.');
         }
-        if (!isValidReservedPlaces(count)) throw new RegistrationCommandParseError('Можна додати або зняти від 1 до 4 місць.');
 
-        const classified = this.extractTrainingHint(body);
-        body = classified.remainingText;
-        const selfWord = operation === 'remove' && /^(?:я|мене)$/iu.test(body);
-        const self = !body || selfWord;
-        if (!self && (body.match(/\p{L}/gu)?.length ?? 0) < 3) {
-            throw new RegistrationCommandParseError('Не вдалося розпізнати імʼя або тренування. Уточніть команду.');
+        const relative = this.extractRelativeDate(extractedAction.remaining);
+        const explicitDate = this.extractExplicitDate(relative.remaining);
+        const time = this.extractTime(explicitDate.remaining, Boolean(relative.value || explicitDate.value));
+        const targetText = this.extractPossibleTargetName(time.remaining);
+        const targetNames = targetText
+            ? targetText.split(',').map((name) => name.trim()).filter(Boolean)
+            : [];
+        if (targetNames.length > 1 && targetNames.length !== extractedAction.count) {
+            throw new RegistrationCommandParseError(`Вказано ${extractedAction.count} місця, але знайдено ${targetNames.length} імені.`);
         }
-        const targetNames = self ? [] : body.split(',').map((name) => name.trim()).filter(Boolean);
-        if (!self && targetNames.length === 0) throw new RegistrationCommandParseError('Укажіть імʼя гравця.');
-        if (targetNames.length > 1 && targetNames.length !== count) {
-            throw new RegistrationCommandParseError(`Вказано ${count} місця, але знайдено ${targetNames.length} імені.`);
-        }
+        const hint: TrainingHint = {
+            naturalDate: relative.value,
+            date: explicitDate.value,
+            time: time.value?.time,
+            endTime: time.value?.endTime,
+        };
+        const hasHint = Object.values(hint).some(Boolean);
         return {
-            operation, action: sign, count, places: count,
-            targetType: self ? 'self' : 'named',
-            targetText: self ? undefined : body,
-            playerName: self ? undefined : body,
+            operation: extractedAction.sign === '+' ? 'add' : 'remove',
+            action: extractedAction.sign,
+            count: extractedAction.count,
+            places: extractedAction.count,
+            targetType: targetNames.length ? 'named' : 'self',
+            targetText: targetNames.length ? targetText : undefined,
+            playerName: targetNames.length ? targetText : undefined,
             targetNames,
-            trainingHint: classified.hint,
-            date: classified.hint?.date ?? classified.hint?.naturalDate,
-            startTime: classified.hint?.time,
+            trainingHint: hasHint ? hint : undefined,
+            date: explicitDate.value ?? relative.value,
+            startTime: time.value?.time,
+            hasExplicitDate: Boolean(relative.value || explicitDate.value),
+            hasExplicitTime: Boolean(time.value?.time),
         };
     }
 
-    private extractTrainingHint(value: string): { remainingText: string; hint?: TrainingHint } {
-        let text = value.trim();
-        if (!text) return { remainingText: '' };
-
-        // Legacy explicit selector remains supported.
-        const legacy = text.match(/^(.*?)(?:\s+at\s+)(?:(\d{4}-\d{2}-\d{2})\s+)?(.+)$/iu);
-        if (legacy) {
-            const time = parseTime(legacy[3]);
-            if (time) return { remainingText: legacy[1].trim(), hint: { date: legacy[2], ...time } };
+    private extractOperationAndCount(text: string): ExtractedAction | undefined {
+        const numeric = this.findNumericAction(text);
+        if (numeric) {
+            return { sign: numeric.sign, count: Number(numeric.countToken), remaining: replaceSpan(text, numeric.start, numeric.length) };
         }
 
-        // Name followed by an explicit time preposition.
-        const suffixTime = text.match(/^(.*?)\s+(?:на|о|в)\s+(.+)$/iu);
-        if (suffixTime) {
-            const time = parseTime(suffixTime[2]);
-            if (time) {
-                const prefixDate = parseDate(suffixTime[1]);
-                if (prefixDate) return { remainingText: '', hint: { ...prefixDate, ...time } };
-                return { remainingText: suffixTime[1].trim(), hint: time };
-            }
+        // Preserve the established shorthand forms: "-", "- я", and "- Name".
+        const legacyRemove = text.match(/^-\s*(.*)$/u);
+        if (legacyRemove) return { sign: '-', count: 1, remaining: legacyRemove[1] };
+        if (/^\+/u.test(text)) throw new RegistrationCommandParseError('Можна додати або зняти від 1 до 4 місць.');
+        return undefined;
+    }
+
+    private findNumericAction(text: string): NumericAction | undefined {
+        return findAction(text);
+    }
+
+    private extractRelativeDate(text: string): TextExtraction<'today' | 'tomorrow'> {
+        for (const [word, value] of Object.entries(RELATIVE_DAYS)) {
+            const match = new RegExp(`(^|[^\\p{L}])${word}(?=$|[^\\p{L}])`, 'iu').exec(text);
+            if (match) return { value, remaining: replaceSpan(text, match.index + match[1].length, word.length) };
         }
+        return { remaining: text };
+    }
 
-        const withoutPreposition = text.replace(/^(?:на|о|в)\s+/iu, '').trim();
-        const date = parseDate(withoutPreposition);
-        if (date) return { remainingText: '', hint: date };
-        const time = parseTime(withoutPreposition);
-        if (time) return { remainingText: '', hint: time };
+    private extractExplicitDate(text: string): TextExtraction<string> {
+        const candidates = [...text.matchAll(/(?:^|[^\d])(\d{1,4}([./-])\d{1,2}(?:\2\d{2,4})?\.?)(?=$|[^\d])/gu)];
+        for (const match of candidates) {
+            const parsed = parseDateToken(match[1]);
+            if (!parsed) continue;
+            const offset = match.index! + match[0].indexOf(match[1]);
+            return { value: parsed, remaining: replaceSpan(text, offset, match[1].length) };
+        }
+        return { remaining: text };
+    }
 
-        return { remainingText: text };
+    private extractTime(text: string, hasDateContext: boolean): TextExtraction<{ time: string; endTime?: string }> {
+        const range = findTime(text, /(?:^|[^\d])(\d{1,2}[:.]\d{2})\s*-\s*(\d{1,2}[:.]\d{2})(?=$|[^\d])/gu);
+        if (range) return range;
+        const separated = findTime(text, /(?:^|[^\d])(\d{1,2}[:.-]\d{2})(?=$|[^\d])/gu);
+        if (separated) return separated;
+        const contextualPair = findTime(text, /(?:^|\s)(?:о|об|в|у|на)\s+(\d{1,2})\s+(\d{2})(?=$|\s|[,!?)])/giu);
+        if (contextualPair) return contextualPair;
+        const fullHour = findTime(text, /(?:^|\s)(?:о|об|в|у|на)\s+(\d{1,2})(?=$|\s|[,!?)])/giu);
+        if (fullHour) return fullHour;
+        // Existing commands such as "+1 12" treat the lone number as a training discriminator.
+        if (hasDateContext || /^\s*\d{1,2}\s*[^\p{L}\p{N}]*$/u.test(text)) {
+            const bareHour = findTime(text, /(?:^|[^\d])(\d{1,2})(?=$|[^\d])/gu);
+            if (bareHour) return bareHour;
+        }
+        return { remaining: text };
+    }
+
+    private extractPossibleTargetName(text: string): string | undefined {
+        let remaining = text;
+        for (const phrase of STOP_WORDS.sort((a, b) => b.length - a.length)) {
+            remaining = remaining.replace(new RegExp(`(^|[^\\p{L}])${escapeRegExp(phrase)}(?=$|[^\\p{L}])`, 'giu'), '$1 ');
+        }
+        remaining = remaining
+            .replace(/[^\p{L}\p{M},'’ʼ-]+/gu, ' ')
+            .replace(/\s*,\s*/g, ', ')
+            .replace(/\s+/g, ' ')
+            .replace(/^(?:[,\s-]+)|(?:[,\s-]+)$/g, '')
+            .trim();
+        if (!remaining || !/\p{L}/u.test(remaining)) return undefined;
+        if ((remaining.match(/\p{L}/gu)?.length ?? 0) < 3) return undefined;
+        return remaining;
     }
 }
 
-function parseDate(value: string): TrainingHint | undefined {
-    const normalized = value.trim().toLocaleLowerCase('uk');
-    if (normalized === 'сьогодні') return { naturalDate: 'today' };
-    if (normalized === 'завтра') return { naturalDate: 'tomorrow' };
-    const iso = normalized.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/u);
-    if (iso) return { date: `${iso[1]}-${pad(iso[2])}-${pad(iso[3])}` };
-    const local = normalized.match(/^(\d{1,2})[./](\d{1,2})(?:[./](\d{4}))?$/u);
-    if (!local) return undefined;
-    if (Number(local[1]) < 1 || Number(local[1]) > 31 || Number(local[2]) < 1 || Number(local[2]) > 12) return undefined;
-    return { date: local[3] ? `${local[3]}-${pad(local[2])}-${pad(local[1])}` : `${pad(local[1])}.${pad(local[2])}` };
-}
-
-function parseTime(value: string): Pick<TrainingHint, 'time' | 'endTime'> | undefined {
-    const normalized = value.trim().replace(/[–—]/g, '-');
-    const match = normalized.match(/^(\d{1,2})(?:(?::|\.)(\d{2}))?(?:-(\d{1,2})(?:(?::|\.)(\d{2}))?)?$/u);
+function findAction(text: string): NumericAction | undefined {
+    const regex = /(?:^|[^\p{L}\p{N}])([+-])\s*(\d+)(?!\d)/gu;
+    const match = regex.exec(text);
     if (!match) return undefined;
-    const hour = Number(match[1]);
-    const minute = Number(match[2] ?? 0);
-    const endHour = match[3] === undefined ? undefined : Number(match[3]);
-    const endMinute = Number(match[4] ?? 0);
-    if (hour > 23 || minute > 59 || (endHour !== undefined && (endHour > 23 || endMinute > 59))) return undefined;
-    return { time: `${pad(hour)}:${pad(minute)}`, endTime: endHour === undefined ? undefined : `${pad(endHour)}:${pad(endMinute)}` };
+    const actionStart = match.index + match[0].search(/[+-]/u);
+    if (!isValidReservedPlaces(Number(match[2])) && actionStart !== 0) return undefined;
+    return { sign: match[1] as '+' | '-', countToken: match[2], start: actionStart, length: regex.lastIndex - actionStart };
 }
 
+function findTime(text: string, regex: RegExp): TextExtraction<{ time: string; endTime?: string }> | undefined {
+    for (const match of text.matchAll(regex)) {
+        const clockInFirstToken = /[:.\-]/u.test(match[1]);
+        const first = parseClock(match[1], clockInFirstToken ? undefined : match[2]);
+        if (!first) continue;
+        const isRange = clockInFirstToken && Boolean(match[2]);
+        const end = isRange ? parseClock(match[2]) : undefined;
+        const tokenStart = match.index! + match[0].indexOf(match[1]);
+        const tokenEnd = match[2]
+            ? match.index! + match[0].lastIndexOf(match[2]) + match[2].length
+            : tokenStart + match[1].length;
+        return { value: { time: first, endTime: end }, remaining: replaceSpan(text, tokenStart, tokenEnd - tokenStart) };
+    }
+    return undefined;
+}
+
+function parseClock(hourToken: string, separateMinute?: string): string | undefined {
+    const parts = hourToken.split(/[:.\-]/u);
+    const hour = Number(parts[0]);
+    const minute = Number(separateMinute ?? parts[1] ?? 0);
+    if (hour > 23 || minute > 59) return undefined;
+    return `${pad(hour)}:${pad(minute)}`;
+}
+
+function parseDateToken(value: string): string | undefined {
+    const normalized = value.replace(/\.$/u, '');
+    const parts = normalized.split(/[./-]/u);
+    if (parts.length === 3 && parts[0].length === 4) {
+        const [year, month, day] = parts.map(Number);
+        return validDate(day, month, year) ? `${year}-${pad(month)}-${pad(day)}` : undefined;
+    }
+    const [day, month, yearValue] = parts.map(Number);
+    const year = parts.length === 3 ? (parts[2].length === 2 ? 2000 + yearValue : yearValue) : undefined;
+    if (!validDate(day, month, year)) return undefined;
+    return year ? `${year}-${pad(month)}-${pad(day)}` : `${pad(day)}.${pad(month)}`;
+}
+
+function validDate(day: number, month: number, year?: number): boolean {
+    if (day < 1 || day > 31 || month < 1 || month > 12) return false;
+    if (year !== undefined && (year < 2000 || year > 9999)) return false;
+    return true;
+}
+
+function replaceSpan(text: string, start: number, length: number): string {
+    return `${text.slice(0, start)} ${text.slice(start + length)}`;
+}
+
+function escapeRegExp(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 function pad(value: string | number): string { return String(value).padStart(2, '0'); }
 
 export const registrationCommandParser = new RegistrationCommandParser();

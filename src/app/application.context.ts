@@ -51,6 +51,8 @@ import { PendingRegistrationSelectionStore, REGISTRATION_SELECTION_CANCEL_PREFIX
 import { PlayerDataHandler } from '../bot/admin/handlers/player-data.handler';
 import { ClubDiagnosticsService } from '../domain/clubs/club-diagnostics.service';
 import { TelegramUserConnectionManager } from '../domain/telegram-import/telegram-user-connection.manager';
+import { ProcessedRegistrationMessageStore } from '../domain/trainings/processed-registration-message.store';
+import { RegistrationRecoveryService } from '../domain/trainings/registration-recovery.service';
 import { TelegramPlayerImportService } from '../domain/telegram-import/telegram-player-import.service';
 import { TelegramPlayerImportHandler } from '../bot/admin/handlers/telegram-player-import.handler';
 import { TelegramQrAuthService } from '../domain/telegram-import/telegram-qr-auth.service';
@@ -72,6 +74,7 @@ type ClubHandlerRuntime = {
     callbackRouter: AdminCallbackRouter;
     textRouter: AdminTextRouter;
     groupRegistration: GroupRegistrationHandler;
+    registrationRecovery: RegistrationRecoveryService;
     superAdminConfig: SuperAdminConfigHandler;
 };
 
@@ -146,6 +149,7 @@ export class ApplicationContext {
         logger.info('application.scheduler_restore_started');
         await this.restoreScheduler();
         logger.info('application.scheduler_restored');
+        await this.recoverRegistrations();
         logger.info('application.bot_started');
     }
 
@@ -305,6 +309,14 @@ export class ApplicationContext {
         logger.info('scheduler.restore_all_completed', { restoredJobCount: totalRestoredJobCount });
     }
 
+    private async recoverRegistrations(): Promise<void> {
+        for (const club of await this.clubs.findAll()) {
+            if (club.status === 'disabled') continue;
+            try { await (await this.getClubRuntime(club.id)).registrationRecovery.recoverActive(); }
+            catch (error) { logger.error('registration.recovery_failed', { clubId: club.id, error }); }
+        }
+    }
+
     private async getClubRuntime(clubId: string): Promise<ClubHandlerRuntime> {
         const existing = this.clubRuntimes.get(clubId);
         if (existing) {
@@ -343,6 +355,7 @@ export class ApplicationContext {
         const templateScheduler = new TemplateSchedulerService(services.templates, services.scheduler, publisher, services.chats, repositories.settings, undefined, services.scheduleExceptions, services.occurrenceResolver);
         const exceptionReconciliation = new ScheduleExceptionReconciliationService(repositories, services.trainings, services.occurrenceResolver);
         const storage = new JsonStorage({ dataDir: this.dataDir, storageSlug: context.storageSlug });
+        const processedRegistrationMessages = new ProcessedRegistrationMessageStore(storage);
         const backups = new BackupService(storage, 5);
         const navigation = new AdminNavigationService(this.sessionContexts, services.adminUi, services.adminFlow);
 
@@ -394,8 +407,9 @@ export class ApplicationContext {
         const superAdminConfig = new SuperAdminConfigHandler(services, configService, [...this.superAdminIds]);
         const callbackRouter = new AdminCallbackRouter(services, this.callbackAuthorization, context.clubId, this.sessionContexts, navigation, templateFlow, playerFlow, trainingFlow, menu, training, player, template, chat, settings, playerData, telegramPlayerImport, setup, exceptions);
         const textRouter = new AdminTextRouter(services, [chat, settingsFlow, superAdminConfig, playerData, telegramPlayerImport], [templateFlow, playerFlow, trainingFlow, settingsFlow, exceptions], this.superAdminIds, this.callbackAuthorization, context.clubId, this.sessionContexts, [settings]);
-        const groupRegistration = new GroupRegistrationHandler(services, publisher, this.registrationSelections);
-        return { context, publisher, templateScheduler, cancellationScheduler, menu, callbackRouter, textRouter, groupRegistration, superAdminConfig };
+        const groupRegistration = new GroupRegistrationHandler(services, publisher, this.registrationSelections, undefined, processedRegistrationMessages);
+        const registrationRecovery = new RegistrationRecoveryService(context.clubId, services, publisher, this.telegramUserConnections, processedRegistrationMessages);
+        return { context, publisher, templateScheduler, cancellationScheduler, menu, callbackRouter, textRouter, groupRegistration, registrationRecovery, superAdminConfig };
     }
 
     private async findRuntimeForChat(chatId: number): Promise<ClubHandlerRuntime | undefined> {

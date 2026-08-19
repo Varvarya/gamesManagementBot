@@ -20,3 +20,5 @@ yarn-error.log*
 !src/domain/telegram-import/telegram-qr-auth.test.ts
 !src/bot/admin/handlers/telegram-import-source-selection.test.ts
 !src/bot/handlers/group-registration.handler.test.ts
+!src/domain/trainings/registration-command.parser.test.ts
+!src/domain/trainings/registration-recovery.service.test.ts

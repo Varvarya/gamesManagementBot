@@ -14,6 +14,7 @@ import { logger } from '../../utils/logger';
 import { classifyTelegramAuthError, isRetryableTelegramAuthFailure, normalizeTelegramCode, normalizeTelegramPhone, readTelegramMtprotoConfig, safeTelegramErrorDetails, TelegramAuthError, TelegramMtprotoConfig } from './telegram-auth-error';
 
 export type TelegramAuthenticationStage = 'starting' | 'code' | 'password' | 'completed' | 'failed';
+export type TelegramHistoryMessage = { messageId: number; date: Date; text: string; telegramUser: { id: number; first_name?: string; username?: string } };
 type Deferred = { promise: Promise<string>; resolve(value: string): void };
 type AuthFlow = { clubId: string; requestedBy: number; client: TelegramClient; code: Deferred; password: Deferred; stage: TelegramAuthenticationStage; stageWaiters: Array<(stage: TelegramAuthenticationStage) => void>; error?: TelegramAuthError; expiresAt: number };
 
@@ -146,6 +147,30 @@ export class TelegramUserConnectionManager {
     async scan(source: TelegramImportSource, clubId: string): Promise<{ participants: TelegramParticipant[]; contacts: TelegramContact[]; partial: boolean }> {
         if (source.clubId !== clubId) throw new Error('CLUB_CONTEXT_MISMATCH'); const connection = await this.requiredConnection(source.connectionId); if (connection.clubId !== clubId) throw new Error('CLUB_CONTEXT_MISMATCH');
         return this.withClient(connection, async (client) => { const loader = new TelegramParticipantLoader(client); const dialog = (await loader.listGroups()).find((item) => item.id === source.telegramChatId); if (!dialog) throw new Error('TELEGRAM_IMPORT_SOURCE_UNAVAILABLE'); const [loaded, contacts] = await Promise.all([loader.load(dialog), new TelegramContactsLoader(client).load()]); return { participants: loaded.participants, contacts, partial: loaded.partial }; });
+    }
+
+    async readRecentMessages(clubId: string, chatId: number, since: Date, limit = 200): Promise<TelegramHistoryMessage[]> {
+        const source = (await this.sources.listByClub(clubId)).find((item) => item.telegramChatId === String(chatId));
+        if (!source) throw new Error('TELEGRAM_RECOVERY_SOURCE_UNAVAILABLE');
+        const connection = await this.requiredConnection(source.connectionId);
+        if (connection.clubId !== clubId || connection.status !== 'connected') throw new Error('TELEGRAM_RECOVERY_SOURCE_UNAVAILABLE');
+        return this.withClient(connection, async (client) => {
+            const dialog = (await new TelegramParticipantLoader(client).listGroups()).find((item) => item.id === source.telegramChatId);
+            if (!dialog) throw new Error('TELEGRAM_IMPORT_SOURCE_UNAVAILABLE');
+            const values = await client.getMessages(dialog.entity, { limit });
+            const result: TelegramHistoryMessage[] = [];
+            for (const message of values) {
+                const rawDate: unknown = message?.date;
+                const date = rawDate instanceof Date ? rawDate : new Date(Number(rawDate) * 1000);
+                if (!message?.message || message.out || Number.isNaN(date.getTime()) || date < since) continue;
+                const sender = await message.getSender();
+                if (!(sender instanceof Api.User) || sender.bot || sender.deleted || sender.self) continue;
+                const id = Number(sender.id.toString());
+                if (!Number.isSafeInteger(id) || id <= 0) continue;
+                result.push({ messageId: Number(message.id), date, text: message.message, telegramUser: { id, first_name: sender.firstName, username: sender.username } });
+            }
+            return result;
+        });
     }
 
     private async withClient<T>(connection: TelegramUserConnection, action: (client: TelegramClient) => Promise<T>): Promise<T> { const encrypted = await readReliableJson(path.join(this.sessionsDirectory, connection.sessionStorageKey), isEncrypted); const client = new TelegramClient(new StringSession(this.cipher!.decrypt(encrypted.data)), this.apiId, this.apiHash, { connectionRetries: 3 }); try { await client.connect(); if (!await client.checkAuthorization()) throw new Error('AUTH_KEY_UNREGISTERED'); return await action(client); } finally { await client.disconnect().catch(() => undefined); } }
