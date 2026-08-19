@@ -135,3 +135,21 @@ test('normal +1 and -1 still execute and refresh the persistent training card', 
     assert.deepEqual(h.replies, []);
     assert.deepEqual(h.deleted, []);
 });
+
+test('commands are silently ignored when no applicable active training exists', async () => {
+    for (const text of ['+1', '+2', '+3', '+4', '-1', '-2', '-3', '-4', 'сьогодні 18:00 +1']) {
+        const h = createHarness({ resolution: { kind: 'none', reason: 'NO_APPLICABLE_TRAINING' } });
+        await h.handler.handle(h.messageContext(text));
+        assert.deepEqual(h.replies, [], text);
+        assert.deepEqual(h.executions, [], text);
+        assert.deepEqual(h.refreshed, [], text);
+        assert.deepEqual(h.deleted, [], text);
+    }
+});
+
+test('unexpected registration errors are logged without a noisy public reply', async () => {
+    const h = createHarness({ executeError: new Error('database unavailable') });
+    await h.handler.handle(h.messageContext('+1'));
+    assert.deepEqual(h.replies, []);
+    assert.deepEqual(h.refreshed, []);
+});

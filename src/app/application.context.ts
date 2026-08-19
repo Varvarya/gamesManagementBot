@@ -24,6 +24,7 @@ import { SuperAdminConfigHandler } from '../bot/handlers/super-admin-config.hand
 import { SuperAdminConfigService } from '../domain/config/super-admin-config.service';
 import { TemplateSchedulerService } from '../domain/templates/template-scheduler.service';
 import { TrainingPublisherService } from '../domain/trainings/training-publisher.service';
+import { ScheduledTrainingPublicationService } from '../domain/trainings/scheduled-training-publication.service';
 
 import { JsonStorage } from '../storage/jsonStorage';
 
@@ -53,6 +54,7 @@ import { ClubDiagnosticsService } from '../domain/clubs/club-diagnostics.service
 import { TelegramUserConnectionManager } from '../domain/telegram-import/telegram-user-connection.manager';
 import { ProcessedRegistrationMessageStore } from '../domain/trainings/processed-registration-message.store';
 import { RegistrationRecoveryService } from '../domain/trainings/registration-recovery.service';
+import { RegistrationReviewService, REGISTRATION_REVIEW_PREFIX } from '../domain/trainings/registration-review.service';
 import { TelegramPlayerImportService } from '../domain/telegram-import/telegram-player-import.service';
 import { TelegramPlayerImportHandler } from '../bot/admin/handlers/telegram-player-import.handler';
 import { TelegramQrAuthService } from '../domain/telegram-import/telegram-qr-auth.service';
@@ -70,6 +72,7 @@ type ClubHandlerRuntime = {
     publisher: TrainingPublisherService;
     templateScheduler: TemplateSchedulerService;
     cancellationScheduler: TrainingCancellationScheduler;
+    scheduledTrainingPublications: ScheduledTrainingPublicationService;
     menu: AdminMenuHandler;
     callbackRouter: AdminCallbackRouter;
     textRouter: AdminTextRouter;
@@ -90,6 +93,7 @@ export class ApplicationContext {
     readonly registrationSelections = new PendingRegistrationSelectionStore();
     readonly telegramUserConnections: TelegramUserConnectionManager;
     readonly telegramQrAuth: TelegramQrAuthService;
+    readonly registrationReviews: RegistrationReviewService;
 
     private readonly superAdminIds: number[];
     private isShuttingDown = false;
@@ -114,6 +118,7 @@ export class ApplicationContext {
         this.clubContexts = new ClubContextManager(options.dataDir, options.defaultTimezone, this.clubs, this.sessionContexts);
         this.telegramUserConnections = new TelegramUserConnectionManager(options.dataDir);
         this.telegramQrAuth = new TelegramQrAuthService(this.telegramUserConnections);
+        this.registrationReviews = new RegistrationReviewService(new JsonStorage({ dataDir: options.dataDir, storageSlug: '_system' }), this.bot.telegram);
         this.clubHealth = new ClubHealthService(this.clubs, options.dataDir, Number(process.env.CLUB_INACTIVE_DAYS ?? 30), this.clubContexts);
         this.navigation = new AdminNavigationService(this.sessionContexts, new AdminUi(this.sessionContexts), new AdminFlowService());
         this.callbackAuthorization = new CallbackAuthorizationService(this.clubs, this.clubCreationRequests, this.superAdminIds, this.sessionContexts);
@@ -239,6 +244,10 @@ export class ApplicationContext {
             'callback_query',
             async (ctx) => {
                 const callback = 'data' in ctx.callbackQuery ? ctx.callbackQuery.data : '';
+                if (callback.startsWith(REGISTRATION_REVIEW_PREFIX)) {
+                    await this.handleRegistrationReview(ctx, callback);
+                    return;
+                }
                 if (callback.startsWith(REGISTRATION_SELECTION_PREFIX) || callback.startsWith(REGISTRATION_SELECTION_CANCEL_PREFIX)) {
                     const clubId = this.registrationSelections.clubIdFor(callback);
                     if (!clubId) {
@@ -297,16 +306,43 @@ export class ApplicationContext {
                 const runtime = await this.getClubRuntime(club.id);
                 const templates = await runtime.context.repositories.templates.listEnabled();
                 const restoredJobCount = await runtime.templateScheduler.restore(templates, { reconcileMissed: true });
+                const restoredOneOffCount = await runtime.scheduledTrainingPublications.restore();
                 totalRestoredJobCount += restoredJobCount;
                 await runtime.cancellationScheduler.restore({ reconcileOverdue: false });
                 const expectedJobCount = templates.reduce((count, template) => count + template.slots.filter((slot) => slot.enabled).length, 0);
                 await this.clubs.recordSchedulerRestore(club.id, expectedJobCount, restoredJobCount);
-                logger.info('scheduler.club_restore_completed', { clubId: club.id, jobCount: restoredJobCount });
+                logger.info('scheduler.club_restore_completed', { clubId: club.id, jobCount: restoredJobCount, oneOffJobCount: restoredOneOffCount });
             } catch (error) {
                 logger.error('scheduler.restore_failed', { clubId: club.id, reason: error instanceof Error ? error.message : String(error) });
             }
         }
         logger.info('scheduler.restore_all_completed', { restoredJobCount: totalRestoredJobCount });
+    }
+
+    private async handleRegistrationReview(ctx: Context, callback: string): Promise<void> {
+        if (!ctx.from) return;
+        const review = await this.registrationReviews.findByCallback(callback);
+        if (!review) { await ctx.answerCbQuery('Запит уже неактивний.', { show_alert: true }); return; }
+        const runtime = await this.getClubRuntime(review.clubId);
+        const settings = await runtime.context.repositories.settings.get();
+        if (!settings.admins.some((item) => item.role === 'admin' && Number(item.telegramUserId) === ctx.from!.id)) { await ctx.answerCbQuery('⛔ Лише адміністратор клубу може вирішити цей запит.', { show_alert: true }); return; }
+        const trainings = (await runtime.context.repositories.trainings.list()).filter((item) => review.candidateTrainingIds.includes(item.id));
+        const action = callback.split(':')[1];
+        if (action === 'o') { if (ctx.chat && ctx.callbackQuery && 'message' in ctx.callbackQuery && ctx.callbackQuery.message) await this.registrationReviews.showOtherTrainings(review, ctx.chat.id, ctx.callbackQuery.message.message_id, trainings); await ctx.answerCbQuery(); return; }
+        let decision: { type: 'reject' } | { type: 'accept'; trainingId: string };
+        if (action === 'n') decision = { type: 'reject' };
+        else {
+            const trainingId = action === 'y' ? review.suggestedTrainingId : review.candidateTrainingIds[Number(callback.split(':')[3])];
+            if (!trainingId) { await ctx.answerCbQuery('Тренування більше недоступне.', { show_alert: true }); return; }
+            decision = { type: 'accept', trainingId };
+        }
+        const result = await this.registrationReviews.resolve(review.id, { id: ctx.from.id, name: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ') }, decision, async (current, trainingId) => {
+            const training = await runtime.context.services.trainings.getRequired(trainingId);
+            if (!runtime.context.services.trainings.isRelevantOpen(training, current.sourceChatId)) throw new Error('TRAINING_NO_LONGER_OPEN');
+            await runtime.context.services.registration.executeCommandAgainstTraining({ telegramUser: current.telegramUser, chatId: current.sourceChatId, command: current.parsedCommand }, trainingId);
+            await runtime.publisher.refreshMessage(trainingId);
+        });
+        await ctx.answerCbQuery(result === 'resolved' ? 'Збережено.' : result === 'expired' ? 'Запит прострочено.' : 'Цей запит уже вирішено.', { show_alert: result !== 'resolved' });
     }
 
     private async recoverRegistrations(): Promise<void> {
@@ -352,6 +388,7 @@ export class ApplicationContext {
         const { repositories, services } = context;
         const publisher = new TrainingPublisherService(this.bot.telegram, repositories, services.trainings, services.trainingMessageRenderer);
         const cancellationScheduler = new TrainingCancellationScheduler(repositories, services.trainings, publisher);
+        const scheduledTrainingPublications = new ScheduledTrainingPublicationService(services.scheduler, repositories.trainings, services.trainings, publisher, services.chats, repositories.settings);
         const templateScheduler = new TemplateSchedulerService(services.templates, services.scheduler, publisher, services.chats, repositories.settings, undefined, services.scheduleExceptions, services.occurrenceResolver);
         const exceptionReconciliation = new ScheduleExceptionReconciliationService(repositories, services.trainings, services.occurrenceResolver);
         const storage = new JsonStorage({ dataDir: this.dataDir, storageSlug: context.storageSlug });
@@ -368,12 +405,6 @@ export class ApplicationContext {
             await this.clubs.recordSuccessfulPublication(context.clubId);
             await cancellationScheduler.schedule(training);
         });
-        void Promise.all([repositories.trainings.list(), repositories.settings.get()]).then(([trainings, settings]) => {
-            for (const training of trainings.filter((item) => item.status === 'draft' && item.scheduledPublicationAt)) {
-                const at = training.scheduledPublicationAt!;
-                services.scheduler.rescheduleOneOff({ id: `club:${training.clubId}:training:${training.id}`, date: at.slice(0, 10), time: at.slice(11, 16), timezone: settings.timezone }, async () => { await publisher.publishExistingDraft(training.id); });
-            }
-        }).catch((error) => logger.error('training.one_off_restore_failed', { clubId: context.clubId, error }));
         services.chats.setOnChanged(async () => { await this.clubs.touchActivity(context.clubId); });
         services.templates.setOnChanged(async () => { await this.clubs.touchActivity(context.clubId); });
         services.scheduleExceptions.setOnChanged(async (exception) => {
@@ -390,8 +421,8 @@ export class ApplicationContext {
 
         const templateFlow = new TemplateFlowHandler(services, templateScheduler);
         const playerFlow = new PlayerFlowHandler(services, publisher);
-        const trainingFlow = new TrainingFlowHandler(services, publisher);
-        const menu = new AdminMenuHandler(services, this.superAdminIds, this.sessionContexts);
+        const trainingFlow = new TrainingFlowHandler(services, publisher, scheduledTrainingPublications);
+        const menu = new AdminMenuHandler(services, this.superAdminIds, this.sessionContexts, this.registrationReviews);
         const training = new AdminTrainingHandler(services, publisher, cancellationScheduler);
         const player = new AdminPlayerHandler(services);
         const playerData = new PlayerDataHandler(services, backups);
@@ -407,9 +438,9 @@ export class ApplicationContext {
         const superAdminConfig = new SuperAdminConfigHandler(services, configService, [...this.superAdminIds]);
         const callbackRouter = new AdminCallbackRouter(services, this.callbackAuthorization, context.clubId, this.sessionContexts, navigation, templateFlow, playerFlow, trainingFlow, menu, training, player, template, chat, settings, playerData, telegramPlayerImport, setup, exceptions);
         const textRouter = new AdminTextRouter(services, [chat, settingsFlow, superAdminConfig, playerData, telegramPlayerImport], [templateFlow, playerFlow, trainingFlow, settingsFlow, exceptions], this.superAdminIds, this.callbackAuthorization, context.clubId, this.sessionContexts, [settings]);
-        const groupRegistration = new GroupRegistrationHandler(services, publisher, this.registrationSelections, undefined, processedRegistrationMessages);
-        const registrationRecovery = new RegistrationRecoveryService(context.clubId, services, publisher, this.telegramUserConnections, processedRegistrationMessages);
-        return { context, publisher, templateScheduler, cancellationScheduler, menu, callbackRouter, textRouter, groupRegistration, registrationRecovery, superAdminConfig };
+        const groupRegistration = new GroupRegistrationHandler(services, publisher, this.registrationSelections, undefined, processedRegistrationMessages, this.registrationReviews);
+        const registrationRecovery = new RegistrationRecoveryService(context.clubId, services, publisher, this.telegramUserConnections, processedRegistrationMessages, this.registrationReviews);
+        return { context, publisher, templateScheduler, cancellationScheduler, scheduledTrainingPublications, menu, callbackRouter, textRouter, groupRegistration, registrationRecovery, superAdminConfig };
     }
 
     private async findRuntimeForChat(chatId: number): Promise<ClubHandlerRuntime | undefined> {

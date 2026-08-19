@@ -1,6 +1,7 @@
 import { Context } from 'telegraf';
 import { ServicesContext } from '../../../app/services.context';
 import { TrainingPublisherService } from '../../../domain/trainings/training-publisher.service';
+import { ScheduledTrainingPublicationService } from '../../../domain/trainings/scheduled-training-publication.service';
 import { AdminCallbacks } from '../callbacks/admin-callbacks';
 import { createFlowNavigationKeyboard } from '../keyboards/flow.keyboard';
 import {
@@ -30,6 +31,7 @@ export class TrainingFlowHandler {
     constructor(
         private readonly services: ServicesContext,
         private readonly publisher: TrainingPublisherService,
+        private readonly scheduledPublications?: ScheduledTrainingPublicationService,
     ) {}
 
     canHandleCallback(
@@ -97,7 +99,7 @@ export class TrainingFlowHandler {
             const pending = this.services.adminFlow.getData(adminId).pendingOneOffTraining as Parameters<TrainingPublisherService['publishManual']>[0] | undefined;
             if (!pending) throw new Error('Дані створення вже неактуальні.');
             let training = callback === AdminCallbacks.TrainingCreatePublishNow ? await this.publisher.publishManual(pending) : await this.services.trainings.createDraft(pending);
-            if (callback === AdminCallbacks.TrainingCreateSchedule) { const at = this.services.adminFlow.getData(adminId).pendingTrainingPublicationAt; if (!at) throw new Error('Не вказано час публікації.'); training.scheduledPublicationAt = at; training = await this.services.trainings.save(training); const settings = await this.services.settings.get(); this.services.scheduler.rescheduleOneOff({ id: `club:${training.clubId}:training:${training.id}`, date: at.slice(0, 10), time: at.slice(11, 16), timezone: settings.timezone }, async () => { await this.publisher.publishExistingDraft(training.id); }); }
+            if (callback === AdminCallbacks.TrainingCreateSchedule) { const at = this.services.adminFlow.getData(adminId).pendingTrainingPublicationAt; if (!at) throw new Error('Не вказано час публікації.'); training.scheduledPublicationAt = at; training = await this.services.trainings.save(training); if (this.scheduledPublications) await this.scheduledPublications.schedule(training.id); else { const settings = await this.services.settings.get(); this.services.scheduler.rescheduleOneOff({ id: `club:${training.clubId}:training:${training.id}`, date: at.slice(0, 10), time: at.slice(11, 16), timezone: settings.timezone }, async () => { await this.publisher.publishExistingDraft(training.id); }); } }
             this.services.adminFlow.finish(adminId);
             await this.showTrainingCard(ctx, training.id);
             return;

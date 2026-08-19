@@ -36,6 +36,7 @@ export function createAdminMainKeyboard(
                 AdminCallbacks.Settings,
             ),
         ],
+        ...(activeTrainingsCount > 0 ? [[Markup.button.callback(`⚠️ Запити на підтвердження (${activeTrainingsCount})`, AdminCallbacks.RegistrationReviews)]] : []),
         ...(isSuperAdmin ? [[Markup.button.callback('🌐 До суперадміністратора', 'mode:super')]] : []),
     ]);
 }

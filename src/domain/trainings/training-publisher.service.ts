@@ -46,6 +46,7 @@ export type PublishTemplateSlotInput = {
 export class TrainingPublisherService {
     private readonly templatePublications =
         new Map<string, Promise<Training>>();
+    private readonly draftPublications = new Map<string, Promise<Training>>();
     private readonly renderedMessages = new Map<string, string>();
     private readonly refreshes = new Map<string, {
         requested: boolean;
@@ -67,8 +68,17 @@ export class TrainingPublisherService {
     }
 
     async publishExistingDraft(trainingId: string): Promise<Training> {
+        const current = this.draftPublications.get(trainingId);
+        if (current) return current;
+        const publication = this.publishExistingDraftOnce(trainingId);
+        this.draftPublications.set(trainingId, publication);
+        try { return await publication; }
+        finally { if (this.draftPublications.get(trainingId) === publication) this.draftPublications.delete(trainingId); }
+    }
+
+    private async publishExistingDraftOnce(trainingId: string): Promise<Training> {
         const training = await this.trainings.getRequired(trainingId);
-        if (training.status !== 'draft') throw new Error('Training is not a draft');
+        if (training.status !== 'draft') return training;
         return this.publishDraft(training);
     }
 
@@ -168,11 +178,13 @@ export class TrainingPublisherService {
         let message: Awaited<ReturnType<Telegram['sendMessage']>>;
 
         try {
+            logger.info('training_publication.telegram_send_started', { clubId: training.clubId, trainingId: training.id, templateId: training.templateId, chatId: training.chatId });
             message = await this.telegram.sendMessage(
                 training.chatId,
                 text,
             );
         } catch (error) {
+            logger.error('training_publication.telegram_send_failed', { clubId: training.clubId, trainingId: training.id, templateId: training.templateId, chatId: training.chatId, error });
             logger.error('publication.send_failed', { trainingId: training.id, chatId: training.chatId, error });
             throw new Error(
                 `Failed to publish training ${training.id} to chat ${training.chatId}`,
@@ -204,6 +216,8 @@ export class TrainingPublisherService {
         }
 
         this.renderedMessages.set(published.id, text);
+        logger.info('training_publication.telegram_send_succeeded', { clubId: published.clubId, trainingId: published.id, templateId: published.templateId, chatId: published.chatId, messageId: published.messageId });
+        logger.info('training_publication.completed', { clubId: published.clubId, trainingId: published.id, templateId: published.templateId, chatId: published.chatId, messageId: published.messageId });
         logger.info('publication.published', { trainingId: published.id, chatId: published.chatId, messageId: published.messageId, templateId: published.templateId, slotId: published.templateSlotId });
 
         if (this.onPublished) {

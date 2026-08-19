@@ -20,7 +20,8 @@ export type ExecuteRegistrationCommandInput = Omit<RegistrationActionInput, 'pla
 export type RegistrationResolution =
     | { kind: 'ready'; training: Training }
     | { kind: 'select'; trainings: Training[] }
-    | { kind: 'none'; reason: 'NO_OPEN_TRAINING' | 'NO_REMOVABLE_REGISTRATION' };
+    | { kind: 'suspicious'; trainings: Training[]; suggestedTraining?: Training; reason: 'TIME_NEAR_MATCH' | 'MULTIPLE_NEAR_MATCHES' }
+    | { kind: 'none'; reason: 'NO_APPLICABLE_TRAINING' | 'NO_OPEN_TRAINING' | 'NO_REMOVABLE_REGISTRATION' };
 
 export class RegistrationService {
     constructor(
@@ -33,7 +34,7 @@ export class RegistrationService {
     async executeCommand(input: ExecuteRegistrationCommandInput): Promise<ParticipantMutation[]> {
         const resolution = await this.resolveCommand(input);
         if (resolution.kind === 'none') throw new Error(resolution.reason);
-        if (resolution.kind === 'select') throw new Error('TRAINING_SELECTION_REQUIRED');
+        if (resolution.kind === 'select' || resolution.kind === 'suspicious') throw new Error('TRAINING_SELECTION_REQUIRED');
         return this.executeCommandAgainstTraining(input, resolution.training.id);
     }
 
@@ -41,9 +42,10 @@ export class RegistrationService {
         if (input.replyToMessageId) {
             const replied = await this.trainings.findByMessageId(input.chatId, input.replyToMessageId);
             if (replied && this.trainings.isRelevantOpen(replied, input.chatId)) return { kind: 'ready', training: replied };
-            return { kind: 'none', reason: input.command.operation === 'add' ? 'NO_OPEN_TRAINING' : 'NO_REMOVABLE_REGISTRATION' };
+            return { kind: 'none', reason: 'NO_APPLICABLE_TRAINING' };
         }
         let candidates = await this.trainings.listRelevantOpenByChatId(input.chatId);
+        if (!candidates.length) return { kind: 'none', reason: 'NO_APPLICABLE_TRAINING' };
         if (input.command.operation === 'remove') candidates = await this.filterRemovableCandidates(candidates, input);
         const hint = input.command.trainingHint;
         if (hint) {
@@ -51,13 +53,22 @@ export class RegistrationService {
             const hinted = candidates.filter((training) => matchesTrainingHint(training, hint, timezone));
             if (hinted.length === 1) return { kind: 'ready', training: hinted[0] };
             if (hinted.length > 1) candidates = hinted;
-            // A convenience hint that matches nothing must not turn numeric text
-            // into a player or bypass the normal selector fallback.
+            else if (hint.time) {
+                const sameDate = candidates.filter((training) => matchesTrainingHint(training, { ...hint, time: undefined, endTime: undefined }, timezone));
+                const nearby = sameDate.filter((training) => Math.abs(toMinutes(training.startTime) - toMinutes(hint.time!)) <= 60)
+                    .sort((a, b) => Math.abs(toMinutes(a.startTime) - toMinutes(hint.time!)) - Math.abs(toMinutes(b.startTime) - toMinutes(hint.time!)));
+                if (nearby.length) return { kind: 'suspicious', trainings: nearby, suggestedTraining: nearby.length === 1 ? nearby[0] : undefined, reason: nearby.length === 1 ? 'TIME_NEAR_MATCH' : 'MULTIPLE_NEAR_MATCHES' };
+            }
+            // Explicit user constraints are never silently discarded. A nearby
+            // time is reviewed by admins above; a distant time/date is no match.
+            if (hint.time || hint.date || hint.naturalDate) {
+                return { kind: 'none', reason: 'NO_APPLICABLE_TRAINING' };
+            }
         } else if (input.date || input.startTime) {
             candidates = candidates.filter((training) =>
                 (!input.date || training.date === input.date) && (!input.startTime || training.startTime === input.startTime));
         }
-        if (!candidates.length) return { kind: 'none', reason: input.command.operation === 'add' ? 'NO_OPEN_TRAINING' : 'NO_REMOVABLE_REGISTRATION' };
+        if (!candidates.length) return { kind: 'none', reason: input.command.operation === 'remove' ? 'NO_REMOVABLE_REGISTRATION' : 'NO_APPLICABLE_TRAINING' };
         if (candidates.length === 1) return { kind: 'ready', training: candidates[0] };
         return { kind: 'select', trainings: candidates };
     }
@@ -169,6 +180,8 @@ export class RegistrationService {
         return training;
     }
 }
+
+function toMinutes(value: string): number { const [hour, minute] = value.split(':').map(Number); return hour * 60 + minute; }
 
 function matchesTrainingHint(training: Training, hint: NonNullable<RegistrationCommand['trainingHint']>, timezone: string): boolean {
     if (hint.time && training.startTime !== hint.time) return false;

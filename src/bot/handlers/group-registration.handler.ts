@@ -10,6 +10,7 @@ import { assertCallbackDataValid } from '../callback-data';
 import { Training } from '../../domain/trainings/training.types';
 import { ProcessedRegistrationMessageStore } from '../../domain/trainings/processed-registration-message.store';
 import { RegistrationResolution } from '../../domain/trainings/registration.service';
+import { RegistrationReviewService, registrationReviewRecipients } from '../../domain/trainings/registration-review.service';
 
 export class GroupRegistrationHandler {
     private readonly handledUpdates =
@@ -21,6 +22,7 @@ export class GroupRegistrationHandler {
         private readonly selections: PendingRegistrationSelectionStore = new PendingRegistrationSelectionStore(),
         private readonly cleanup: RegistrationMessageCleanup = new RegistrationMessageCleanup(),
         private readonly processed?: ProcessedRegistrationMessageStore,
+        private readonly reviews?: RegistrationReviewService,
     ) {}
 
     async handle(
@@ -96,24 +98,43 @@ export class GroupRegistrationHandler {
             };
             const execute = async () => {
                 const resolution = await this.services.registration.resolveCommand(input);
-                if (resolution.kind === 'none') throw new Error(resolution.reason);
+                if (resolution.kind === 'none') return { value: resolution };
+                if (resolution.kind === 'suspicious') {
+                    if (!this.reviews) throw new Error('REGISTRATION_REVIEW_UNAVAILABLE');
+                    const settings = await this.services.repositories.settings.get();
+                    await this.reviews.createOrGet({
+                        clubId: this.services.repositories.clubId, sourceChatId: message.chat.id, sourceMessageId: message.message_id,
+                        sourceText: message.text, telegramUser: input.telegramUser, parsedCommand: command,
+                        candidateTrainingIds: resolution.trainings.map((item) => item.id), suggestedTrainingId: resolution.suggestedTraining?.id, reason: resolution.reason,
+                    }, registrationReviewRecipients(settings.admins), resolution.trainings);
+                    return { value: resolution, status: 'pending_ambiguity' as const };
+                }
                 if (resolution.kind === 'select') return { value: resolution, status: 'pending_ambiguity' as const };
                 await this.services.registration.executeCommandAgainstTraining(input, resolution.training.id);
                 return { value: resolution, trainingId: resolution.training.id };
             };
             const processed = this.processed
-                ? await this.processed.processOnce<Exclude<RegistrationResolution, { kind: 'none' }>>(message.chat.id, message.message_id, execute)
+                ? await this.processed.processOnce<RegistrationResolution>(message.chat.id, message.message_id, execute)
                 : { duplicate: false as const, value: (await execute()).value };
             if (processed.duplicate) return;
             const resolution = processed.value;
+            if (resolution.kind === 'none') {
+                if (resolution.reason === 'NO_APPLICABLE_TRAINING' || resolution.reason === 'NO_OPEN_TRAINING') {
+                    logger.info('registration_command.ignored', { reason: 'no_applicable_training', chatId: message.chat.id, telegramUserId: message.from.id, messageId: message.message_id });
+                    return;
+                }
+                throw new Error(resolution.reason);
+            }
+            if (resolution.kind === 'suspicious') return;
             if (resolution.kind === 'select') {
                 await this.showTrainingSelector(ctx, input, resolution.trainings);
                 return;
             }
             await this.publisher.refreshMessage(resolution.training.id);
         } catch (error) {
-            logger.warn(
-                'registration.action_rejected',
+            const userFacing = this.isUserFacingError(error);
+            logger[userFacing ? 'warn' : 'error'](
+                userFacing ? 'registration.action_rejected' : 'registration.action_failed',
                 {
                     chatId:
                     ctx.chat?.id,
@@ -124,7 +145,7 @@ export class GroupRegistrationHandler {
                 },
             );
 
-            await this.cleanup.sendTemporary(ctx, this.errorFeedback(error));
+            if (userFacing) await this.cleanup.sendTemporary(ctx, this.errorFeedback(error));
         }
     }
 
@@ -236,6 +257,12 @@ export class GroupRegistrationHandler {
         }
 
         return 'Не вдалося змінити реєстрацію. Перевірте формат і спробуйте ще раз.';
+    }
+
+    private isUserFacingError(error: unknown): boolean {
+        if (error instanceof RegistrationCommandParseError) return true;
+        const message = error instanceof Error ? error.message : '';
+        return ['MAX_REGISTRATION_PLACES', 'SELF_NOT_REGISTERED', 'NAMED_NOT_OWNED', 'AMBIGUOUS_PLAYER_NAME', 'NO_REMOVABLE_REGISTRATION', 'TRAINING_NO_LONGER_OPEN', 'not open'].some((code) => message.includes(code));
     }
 
 }

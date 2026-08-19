@@ -173,6 +173,7 @@ export const AdminCallbacks = {
     SettingsStatus: 'cfg:st',
 
     Help: 'h',
+    RegistrationReviews: 'rv',
 
     ClubRequestList: 'cr:l',
     ClubRequestCreate: 'cr:n',

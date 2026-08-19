@@ -6,23 +6,28 @@ import { SessionContextService } from '../../session/session-context.service';
 import { logger } from '../../../utils/logger';
 import { isTelegramUserClubAdmin } from '../../../domain/settings/club-admin-authorization';
 import { createSetupOverviewKeyboard } from '../keyboards/setup.keyboard';
+import { RegistrationReviewService } from '../../../domain/trainings/registration-review.service';
+import { Markup } from 'telegraf';
 
 export class AdminMenuHandler {
     constructor(
         private readonly services: ServicesContext,
         private readonly superAdminIds: readonly number[] = [],
         private readonly sessions?: SessionContextService,
+        private readonly reviews?: RegistrationReviewService,
     ) {}
 
     canHandle(callback: string): boolean {
-        return callback === AdminCallbacks.MainMenu || callback === AdminCallbacks.Help;
+        return callback === AdminCallbacks.MainMenu || callback === AdminCallbacks.Help || callback === AdminCallbacks.RegistrationReviews;
     }
 
     async handle(
         ctx: Context,
         callback: string,
     ): Promise<void> {
-        if (callback === AdminCallbacks.Help) {
+        if (callback === AdminCallbacks.RegistrationReviews) {
+            await this.showReviews(ctx);
+        } else if (callback === AdminCallbacks.Help) {
             await this.showHelp(ctx);
         } else if (callback === AdminCallbacks.MainMenu) {
             await this.showMain(ctx);
@@ -47,6 +52,7 @@ export class AdminMenuHandler {
         const chats = await this.services.chats.getAll();
         const hasActiveChat = chats.some((chat) => chat.enabled);
         const readiness = await this.services.readiness.calculate();
+        const pendingReviews = await this.reviews?.listPending(this.services.repositories.clubId) ?? [];
         if (!readiness.ready && !session?.setupIntroSeen) {
             this.sessions?.markSetupIntroSeen(adminId);
             const mark = (done: boolean) => done ? '✅' : '⬜';
@@ -63,13 +69,21 @@ export class AdminMenuHandler {
                 !readiness.ready ? `\n⚠️ Завершіть налаштування:\n${readiness.warnings.map((warning) => `• ${warning.message}`).join('\n')}` : undefined,
             ].filter((line): line is string => line !== undefined).join('\n'),
             createAdminMainKeyboard(
-                0,
+                pendingReviews.length,
                 0,
                 { hasChats: chats.length > 0, hasTemplates: true },
                 this.superAdminIds.includes(adminId),
                 !readiness.ready,
             ),
         );
+    }
+
+    private async showReviews(ctx: Context): Promise<void> {
+        const values = await this.reviews?.listPending(this.services.repositories.clubId) ?? [];
+        const lines = values.map((item, index) => `${index + 1}. ${item.telegramUser.first_name ?? item.telegramUser.id} · ${item.parsedCommand.action}${item.parsedCommand.count} · ${item.parsedCommand.startTime ?? 'час не вказано'} → ?`);
+        const rows = values.map((item) => [Markup.button.callback(`${item.parsedCommand.action}${item.parsedCommand.count} · ${item.telegramUser.first_name ?? item.telegramUser.id}`, `rr:o:${item.token}`)]);
+        rows.push([Markup.button.callback('🏠 Головне меню', AdminCallbacks.MainMenu)]);
+        await this.services.adminUi.show(ctx, values.length ? `⚠️ Підтвердження записів (${values.length})\n\n${lines.join('\n')}` : '✅ Запитів на підтвердження немає.', Markup.inlineKeyboard(rows));
     }
 
     private async showHelp(ctx: Context): Promise<void> {

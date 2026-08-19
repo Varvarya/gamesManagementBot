@@ -72,7 +72,9 @@ export class TemplateSchedulerService {
     }
 
     async restore(templates: TrainingTemplate[], options: { reconcileMissed?: boolean } = {}): Promise<number> {
-        this.scheduler.cancelAll();
+        const clubId = templates[0]?.clubId ?? (await this.settings.get()).clubId;
+        this.scheduler.cancelByPrefix(`club:${clubId}:template:`);
+        this.scheduler.cancelByPrefix(`club:${clubId}:exception:`);
 
         for (const template of templates) {
             await this.syncTemplate(template, options.reconcileMissed ?? false);
@@ -141,6 +143,14 @@ export class TemplateSchedulerService {
             timezone,
             jobId,
         });
+        const zonedNow = getZonedNow(this.now(), timezone);
+        const nextTrainingDate = findNearestFutureTrainingDate(zonedNow, resolved.dayOfWeek, resolved.startTime);
+        logger.info('training_publication.scheduled', {
+            clubId: template.clubId, templateId: template.id, slotId: slot.id, chatId: template.chatId,
+            trainingStartsAt: `${nextTrainingDate}T${resolved.startTime}`,
+            openAt: `${addCalendarDays(nextTrainingDate, -resolved.publishDaysBefore)}T${resolved.publishTime}`,
+            timezone, jobId, registeredAt: this.now().toISOString(),
+        });
 
         this.scheduler.rescheduleTemplate(
             {
@@ -161,6 +171,7 @@ export class TemplateSchedulerService {
                     );
 
                     if (!currentTemplate.enabled || !currentSlot?.enabled) {
+                        logger.info('training_publication.skipped', { jobId, clubId: currentTemplate.clubId, templateId: currentTemplate.id, slotId: slot.id, reason: 'template_or_slot_disabled' });
                         this.scheduler.cancelTemplate(jobId);
                         return;
                     }
@@ -207,7 +218,10 @@ export class TemplateSchedulerService {
                 resolved.publishTime <= zonedNow.time
             )
         ) {
+            const jobId = this.getSlotJobId(template.clubId, template.id, slot.id);
+            logger.warn('training_publication.overdue_detected', { clubId: template.clubId, templateId: template.id, slotId: slot.id, chatId: template.chatId, trainingStartsAt: `${trainingDate}T${resolved.startTime}`, openAt: `${publicationDate}T${resolved.publishTime}`, timezone, jobId });
             await this.publishSlot(template, slot, trainingDate);
+            logger.info('training_publication.recovered', { clubId: template.clubId, templateId: template.id, slotId: slot.id, chatId: template.chatId, trainingStartsAt: `${trainingDate}T${resolved.startTime}`, openAt: `${publicationDate}T${resolved.publishTime}`, timezone, jobId });
         }
     }
 
@@ -219,21 +233,25 @@ export class TemplateSchedulerService {
         const exception = await this.exceptions?.findForOccurrence(slot.id, trainingDate);
         const occurrence = this.occurrenceResolver.resolveRecurring(template, slot, trainingDate, exception);
         if (!occurrence?.publicationEnabled) {
-            logger.info('schedule.occurrence_publication_skipped', { clubId: template.clubId, scheduleEntryId: slot.id, date: trainingDate, reason: exception?.type ?? 'paused' });
+            logger.info('training_publication.skipped', { clubId: template.clubId, templateId: template.id, slotId: slot.id, date: trainingDate, reason: exception?.type ?? 'paused' });
             return;
         }
         // A changed publication time is handled by its one-off job, not by the recurring job.
         const resolved = resolveTemplateSlot(template, slot);
-        if (exception?.type === 'override' && occurrence.publishTime !== resolved.publishTime) return;
+        if (exception?.type === 'override' && occurrence.publishTime !== resolved.publishTime) {
+            logger.info('training_publication.skipped', { clubId: template.clubId, templateId: template.id, slotId: slot.id, date: trainingDate, reason: 'publication_time_overridden' });
+            return;
+        }
         await this.publishOccurrence(occurrence);
     }
 
     private async publishOccurrence(occurrence: EffectiveOccurrence): Promise<void> {
         const chat = await this.chats.getById(occurrence.chatId);
         if (!chat?.enabled) {
+            logger.error('training_publication.chat_not_found', { clubId: occurrence.clubId, templateId: occurrence.scheduleId, slotId: occurrence.scheduleEntryId, chatId: occurrence.chatId, trainingStartsAt: `${occurrence.date}T${occurrence.startTime}` });
             throw new Error(`Schedule publication chat ${occurrence.chatId} is missing or disabled`);
         }
-        logger.info('publication.send_started', { clubId: occurrence.clubId, templateId: occurrence.scheduleId, slotId: occurrence.scheduleEntryId, date: occurrence.date, chatId: occurrence.chatId });
+        logger.info('training_publication.telegram_send_started', { clubId: occurrence.clubId, templateId: occurrence.scheduleId, slotId: occurrence.scheduleEntryId, date: occurrence.date, chatId: occurrence.chatId });
         const training = await this.publisher.publishTemplateSlot({
             templateId: occurrence.scheduleId ?? `exception:${occurrence.exceptionId}`,
             slotId: occurrence.scheduleEntryId ?? 'extra', clubId: occurrence.clubId, chatId: occurrence.chatId,
@@ -241,7 +259,7 @@ export class TemplateSchedulerService {
             endTime: occurrence.endTime, placesLimit: occurrence.placesLimit, minPlayers: occurrence.minPlayers,
             cancelCheckHoursBefore: occurrence.cancelCheckHoursBefore,
         });
-        logger.info('publication.send_completed', { clubId: occurrence.clubId, trainingId: training.id, templateId: occurrence.scheduleId, slotId: occurrence.scheduleEntryId, date: occurrence.date, chatId: occurrence.chatId, messageId: training.messageId, reused: training.status !== 'draft' });
+        logger.info('training_publication.completed', { clubId: occurrence.clubId, trainingId: training.id, templateId: occurrence.scheduleId, slotId: occurrence.scheduleEntryId, date: occurrence.date, chatId: occurrence.chatId, messageId: training.messageId, reused: training.status !== 'draft' });
     }
 
     async syncExceptionJobs(currentTemplates?: TrainingTemplate[]): Promise<void> {

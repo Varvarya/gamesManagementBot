@@ -5,6 +5,7 @@ import { registrationCommandParser, RegistrationCommandParseError } from './regi
 import { ProcessedRegistrationMessageStore } from './processed-registration-message.store';
 import { TrainingPublisherService } from './training-publisher.service';
 import { Training } from './training.types';
+import { RegistrationReviewService, registrationReviewRecipients } from './registration-review.service';
 
 export class RegistrationRecoveryService {
     constructor(
@@ -13,6 +14,7 @@ export class RegistrationRecoveryService {
         private readonly publisher: TrainingPublisherService,
         private readonly connections: Pick<TelegramUserConnectionManager, 'readRecentMessages'>,
         private readonly processed: ProcessedRegistrationMessageStore,
+        private readonly reviews?: RegistrationReviewService,
         private readonly historyLimit = 200,
     ) {}
 
@@ -44,6 +46,12 @@ export class RegistrationRecoveryService {
                     const input = { telegramUser: message.telegramUser, chatId: training.chatId, command };
                     const resolution = await this.services.registration.resolveCommand(input);
                     if (resolution.kind === 'none') throw new Error(resolution.reason);
+                    if (resolution.kind === 'suspicious') {
+                        if (!this.reviews) throw new Error('REGISTRATION_REVIEW_UNAVAILABLE');
+                        const settings = await this.services.repositories.settings.get();
+                        await this.reviews.createOrGet({ clubId: this.clubId, sourceChatId: training.chatId, sourceMessageId: message.messageId, sourceText: message.text, telegramUser: message.telegramUser, parsedCommand: command, candidateTrainingIds: resolution.trainings.map((item) => item.id), suggestedTrainingId: resolution.suggestedTraining?.id, reason: resolution.reason }, registrationReviewRecipients(settings.admins), resolution.trainings);
+                        return { value: { kind: 'ambiguous' as const }, status: 'pending_ambiguity' as const };
+                    }
                     if (resolution.kind === 'select') return { value: { kind: 'ambiguous' as const }, status: 'pending_ambiguity' as const };
                     await this.services.registration.executeCommandAgainstTraining(input, resolution.training.id);
                     return { value: { kind: 'processed' as const, trainingId: resolution.training.id }, trainingId: resolution.training.id };
