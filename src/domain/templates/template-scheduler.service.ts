@@ -37,19 +37,19 @@ export class TemplateSchedulerService {
 
     async create(input: CreateTemplateInput): Promise<TrainingTemplate> {
         const template = await this.templates.create(input);
-        await this.syncTemplate(template);
+        await this.syncTemplate(template, true);
         return template;
     }
 
     async update(templateId: string, input: UpdateTemplateInput): Promise<TrainingTemplate> {
         const template = await this.templates.update(templateId, input);
-        await this.syncTemplate(template);
+        await this.syncTemplate(template, true);
         return template;
     }
 
     async enable(templateId: string): Promise<TrainingTemplate> {
         const template = await this.templates.enable(templateId);
-        await this.syncTemplate(template);
+        await this.syncTemplate(template, true);
         return template;
     }
 
@@ -82,11 +82,7 @@ export class TemplateSchedulerService {
         await this.syncExceptionJobs(templates);
 
         const snapshot = this.scheduler.getJobsSnapshot();
-        logger.info('scheduler.jobs_snapshot', {
-            clubId: templates[0]?.clubId ?? (await this.settings.get()).clubId,
-            jobIds: snapshot.map((job) => job.jobId),
-            nextRunAt: snapshot.map((job) => ({ jobId: job.jobId, nextRunAt: job.nextRunAt })),
-        });
+        logger.info('scheduler.jobs_snapshot', { clubId: templates[0]?.clubId ?? (await this.settings.get()).clubId, jobs: snapshot });
 
         return this.scheduler.getScheduledTemplateIds()
             .filter(id => id.startsWith('club:') && id.includes(':template:'))
@@ -145,11 +141,13 @@ export class TemplateSchedulerService {
         });
         const zonedNow = getZonedNow(this.now(), timezone);
         const nextTrainingDate = findNearestFutureTrainingDate(zonedNow, resolved.dayOfWeek, resolved.startTime);
+        const publicationDate = addCalendarDays(nextTrainingDate, -resolved.publishDaysBefore);
         logger.info('training_publication.scheduled', {
             clubId: template.clubId, templateId: template.id, slotId: slot.id, chatId: template.chatId,
             trainingStartsAt: `${nextTrainingDate}T${resolved.startTime}`,
-            openAt: `${addCalendarDays(nextTrainingDate, -resolved.publishDaysBefore)}T${resolved.publishTime}`,
-            timezone, jobId, registeredAt: this.now().toISOString(),
+            openAt: `${publicationDate}T${resolved.publishTime}`,
+            localPublishAt: `${publicationDate}T${resolved.publishTime}`,
+            timezone, currentTime: `${zonedNow.date}T${zonedNow.time}`, jobId, registeredAt: this.now().toISOString(),
         });
 
         this.scheduler.rescheduleTemplate(
@@ -164,6 +162,7 @@ export class TemplateSchedulerService {
             },
             async () => {
                 try {
+                    logger.info('scheduler.template_job_started', { jobId, clubId: template.clubId, templateId: template.id, slotId: slot.id, scheduledFor: resolved.publishTime, timezone, startedAt: this.now().toISOString() });
                     const currentTemplate =
                         await this.templates.getRequired(template.id);
                     const currentSlot = currentTemplate.slots.find(
@@ -183,9 +182,12 @@ export class TemplateSchedulerService {
                         publicationDate,
                         currentResolved.publishDaysBefore,
                     );
+                    const currentPublicationDate = addCalendarDays(trainingDate, -currentResolved.publishDaysBefore);
 
-                    logger.info('scheduler.occurrence_resolved', { clubId: currentTemplate.clubId, templateId: currentTemplate.id, slotId: currentSlot.id, trainingDate });
+                    logger.info('scheduler.occurrence_resolved', { clubId: currentTemplate.clubId, templateId: currentTemplate.id, slotId: currentSlot.id, trainingDate, startTime: currentResolved.startTime, publishAt: `${currentPublicationDate}T${currentResolved.publishTime}`, timezone });
+                    logger.info('scheduler.publication_started', { jobId, clubId: currentTemplate.clubId, templateId: currentTemplate.id, slotId: currentSlot.id, trainingDate });
                     await this.publishSlot(currentTemplate, currentSlot, trainingDate);
+                    logger.info('scheduler.publication_completed', { jobId, clubId: currentTemplate.clubId, templateId: currentTemplate.id, slotId: currentSlot.id, trainingDate });
                 } catch (error) {
                     logger.error('scheduler.automatic_publication_failed', { jobId, clubId: template.clubId, templateId: template.id, slotId: slot.id, stage: 'occurrence_or_publication', error });
                     throw error;

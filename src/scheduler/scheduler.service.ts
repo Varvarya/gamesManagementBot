@@ -18,6 +18,7 @@ type SchedulerPublishHandler =
 export class SchedulerService {
     private readonly jobs =
         new Map<string, Job>();
+    private readonly metadata = new Map<string, { timezone: string; cronExpression?: string; localPublishAt?: string }>();
 
     rescheduleTemplate(
         template: SchedulerTemplate,
@@ -57,7 +58,11 @@ export class SchedulerService {
             template.id,
             job,
         );
-        logger.info('scheduler.job_scheduled', { jobId: template.id, dayOfWeek: template.dayOfWeek, publishTime: template.publishTime, timezone: template.timezone, computedNextPublishAt: job.nextInvocation()?.toISOString(), jobRegistered: true });
+        const cronDay = this.toNodeScheduleDay(template.dayOfWeek);
+        const cronExpression = `0 ${Number(template.publishTime.slice(3, 5))} ${Number(template.publishTime.slice(0, 2))} * * ${cronDay}`;
+        const nextRun = job.nextInvocation();
+        this.metadata.set(template.id, { timezone: template.timezone, cronExpression, localPublishAt: nextRun ? this.formatLocal(nextRun, template.timezone) : undefined });
+        logger.info('scheduler.job_scheduled', { jobId: template.id, dayOfWeek: template.dayOfWeek, publishTime: template.publishTime, timezone: template.timezone, cronExpression, localPublishAt: nextRun ? this.formatLocal(nextRun, template.timezone) : undefined, utcPublishAt: nextRun?.toISOString(), nextRunAt: nextRun?.toISOString(), jobRegistered: true });
     }
 
     rescheduleOneOff(input: SchedulerOneOff, onPublish: SchedulerPublishHandler): void {
@@ -75,6 +80,7 @@ export class SchedulerService {
                 logger.error('scheduler.job_failed', { jobId: input.id, stage: 'execute', error });
             } finally {
                 this.jobs.delete(input.id);
+                this.metadata.delete(input.id);
             }
         });
         if (!job) {
@@ -82,6 +88,7 @@ export class SchedulerService {
             return; // Past one-off jobs are reconciled explicitly and never replayed on restore.
         }
         this.jobs.set(input.id, job);
+        this.metadata.set(input.id, { timezone: input.timezone, localPublishAt: `${input.date}T${input.time}` });
         logger.info('scheduler.one_off_scheduled', { jobId: input.id, date: input.date, time: input.time, timezone: input.timezone, computedNextPublishAt: job.nextInvocation()?.toISOString(), jobRegistered: true });
     }
 
@@ -102,6 +109,7 @@ export class SchedulerService {
         this.jobs.delete(
             templateId,
         );
+        this.metadata.delete(templateId);
         logger.info('scheduler.job_cancelled', { jobId: templateId });
     }
 
@@ -129,6 +137,7 @@ export class SchedulerService {
         }
 
         this.jobs.clear();
+        this.metadata.clear();
         logger.info('scheduler.all_jobs_cancelled');
     }
 
@@ -146,11 +155,20 @@ export class SchedulerService {
         ];
     }
 
-    getJobsSnapshot(): Array<{ jobId: string; nextRunAt?: string }> {
+    getJobsSnapshot(): Array<{ jobId: string; nextRunAt?: string; timezone?: string; cronExpression?: string; localPublishAt?: string }> {
         return [...this.jobs].map(([jobId, job]) => ({
             jobId,
             nextRunAt: job.nextInvocation()?.toISOString(),
+            ...this.metadata.get(jobId),
         }));
+    }
+
+    private formatLocal(value: { toISOString(): string }, timezone: string): string {
+        // node-schedule returns a CronDate from nextInvocation(), not a native Date.
+        const native = new Date(value.toISOString());
+        const parts = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(native);
+        const get = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value ?? '';
+        return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}`;
     }
 
     private createRule(

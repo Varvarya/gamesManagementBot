@@ -181,3 +181,47 @@ test('startup recovers the exact overdue 20.08.2026 18:00 recurring occurrence i
     assert.equal(publications, 1);
     assert.equal(publishedDate, '2026-08-20');
 });
+
+test('create, edit, and resume reconcile an overdue current-week occurrence instead of waiting a week', async (t) => {
+    const { root, repositories } = await fixture();
+    t.after(() => rm(root, { recursive: true, force: true }));
+    await repositories.chats.create({ id: -100, name: 'WAVE', enabled: true });
+    const services = new ServicesContext(repositories);
+    const jobs = new Map<string, () => Promise<void>>();
+    const scheduler = {
+        cancelTemplate: (id: string) => jobs.delete(id),
+        cancelByPrefix: (prefix: string) => { for (const id of [...jobs.keys()]) if (id.startsWith(prefix)) jobs.delete(id); },
+        rescheduleTemplate: (job: SchedulerTemplate, handler: () => Promise<void>) => jobs.set(job.id, handler),
+        getJobsSnapshot: () => [...jobs.keys()].map((jobId) => ({ jobId })),
+        getScheduledTemplateIds: () => [...jobs.keys()],
+    } as unknown as SchedulerService;
+    const published: string[] = [];
+    const publisher = { publishTemplateSlot: async (input: { templateId: string; date: string }) => { published.push(`${input.templateId}:${input.date}`); return { id: input.templateId, status: 'open', messageId: 42 }; } } as unknown as TrainingPublisherService;
+    // 19:00 Kyiv on Wednesday, after the configured 18:10 opening,
+    // while Thursday's 18:00 training is still in the future.
+    const automatic = new TemplateSchedulerService(services.templates, scheduler, publisher, services.chats, repositories.settings, () => new Date('2026-08-19T16:00:00.000Z'));
+    const common = { clubId: 'club-a', chatId: -100, title: 'Training', placesLimit: 12, minPlayers: 4, publishDaysBefore: 1, publishTime: '18:10', slots: [{ dayOfWeek: 4, startTime: '18:00', endTime: '20:00', enabled: true }] };
+
+    const created = await automatic.create({ ...common, enabled: true });
+    assert.equal(published.at(-1), `${created.id}:2026-08-20`);
+    assert.ok([...jobs.keys()].some((id) => id.includes(created.id)), 'recurring job remains scheduled for following occurrences');
+
+    const paused = await services.templates.create({ ...common, title: 'Paused', enabled: false });
+    await automatic.enable(paused.id);
+    assert.equal(published.at(-1), `${paused.id}:2026-08-20`);
+
+    const editable = await services.templates.create({ ...common, title: 'Editable', enabled: true });
+    await automatic.update(editable.id, { title: 'Edited' });
+    assert.equal(published.at(-1), `${editable.id}:2026-08-20`);
+});
+
+test('Thursday minus one day maps to a Wednesday 18:10 Kyiv scheduler job', () => {
+    const scheduler = new SchedulerService();
+    const jobId = 'club:a:template:t:slot:thursday';
+    scheduler.rescheduleTemplate({ id: jobId, dayOfWeek: 3, publishTime: '18:10', timezone: 'Europe/Kyiv' }, async () => undefined);
+    const snapshot = scheduler.getJobsSnapshot().find((item) => item.jobId === jobId);
+    assert.equal(snapshot?.cronExpression, '0 10 18 * * 3');
+    assert.equal(snapshot?.timezone, 'Europe/Kyiv');
+    assert.match(snapshot?.localPublishAt ?? '', /^\d{4}-\d{2}-\d{2}T18:10$/);
+    scheduler.cancelAll();
+});
