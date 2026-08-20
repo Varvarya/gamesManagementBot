@@ -165,3 +165,47 @@ test('Telegram edit failure is contained and a later refresh can retry', async (
     assert.equal(await publisher.refreshMessage(training.id), true);
     assert.equal(attempts, 2);
 });
+
+test('restart refresh edits the persisted canonical chat/message and never publishes a replacement', async () => {
+    const training = {
+        id: 'training', clubId: 'club', chatId: -100777, messageId: 918,
+        title: 'Training', date: '2026-08-21', startTime: '18:00', endTime: '20:00',
+        placesLimit: 8, minPlayers: 2, status: 'open', participants: [], waitlist: [],
+        createdAt: '', publishedAt: '2026-08-20T15:10:00.000Z', updatedAt: '',
+    } as Training;
+    const edits: Array<{ chatId: number; messageId: number; text: string }> = [];
+    let sends = 0;
+    // A newly constructed publisher models process restart: there is no
+    // in-memory publication/message reference to rely on.
+    const publisher = new TrainingPublisherService(
+        {
+            editMessageText: async (chatId: number, messageId: number, _inline: undefined, text: string) => { edits.push({ chatId, messageId, text }); return true; },
+            sendMessage: async () => { sends++; throw new Error('must not publish during refresh'); },
+        } as unknown as Telegram,
+        { players: { list: async () => [] } } as unknown as RepositoriesContext,
+        { getRequired: async () => training } as unknown as TrainingService,
+        { render: () => 'canonical corrected list' } as unknown as TrainingMessageRenderer,
+    );
+
+    assert.equal(await publisher.refreshMessage(training.id), true);
+    assert.deepEqual(edits, [{ chatId: -100777, messageId: 918, text: 'canonical corrected list' }]);
+    assert.equal(sends, 0);
+});
+
+test('missing persisted message identity never falls back to sending a duplicate', async () => {
+    const training = {
+        id: 'training', clubId: 'club', chatId: -100777, title: 'Training', date: '2026-08-21',
+        startTime: '18:00', endTime: '20:00', placesLimit: 8, minPlayers: 2, status: 'open',
+        participants: [], waitlist: [], createdAt: '', updatedAt: '',
+    } as Training;
+    let edits = 0; let sends = 0;
+    const publisher = new TrainingPublisherService(
+        { editMessageText: async () => { edits++; }, sendMessage: async () => { sends++; } } as unknown as Telegram,
+        { players: { list: async () => [] } } as unknown as RepositoriesContext,
+        { getRequired: async () => training } as unknown as TrainingService,
+        { render: () => 'unused' } as unknown as TrainingMessageRenderer,
+    );
+    assert.equal(await publisher.refreshMessage(training.id), false);
+    assert.equal(edits, 0);
+    assert.equal(sends, 0);
+});

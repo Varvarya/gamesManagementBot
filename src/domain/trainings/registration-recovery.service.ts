@@ -33,8 +33,11 @@ export class RegistrationRecoveryService {
     ) {}
 
     async recoverActive(): Promise<void> {
-        const trainings = (await this.services.repositories.trainings.list())
-            .filter((item) => this.services.trainings.isRelevantOpen(item, item.chatId));
+        const all = await this.services.repositories.trainings.list();
+        for (const training of all.filter((item) => item.status === 'open' && item.messageId === undefined)) {
+            logger.warn('registration.reconciliation_unavailable', { clubId: this.clubId, trainingId: training.id, chatId: training.chatId, reason: 'publication_message_identity_missing' });
+        }
+        const trainings = all.filter((item) => this.services.trainings.isRelevantOpen(item, item.chatId));
         for (const training of trainings) await this.recoverTraining(training);
     }
 
@@ -46,7 +49,11 @@ export class RegistrationRecoveryService {
         return this.lock.run(training.id, async () => {
             const current = await this.services.trainings.getRequired(training.id);
             const empty = resultFor(current);
-            if (current.status !== 'open' || current.messageId === undefined) return empty;
+            if (current.status !== 'open') return empty;
+            if (current.messageId === undefined) {
+                logger.warn('registration.reconciliation_unavailable', { clubId: this.clubId, trainingId: current.id, chatId: current.chatId, reason: 'publication_message_identity_missing' });
+                return empty;
+            }
             const openedAt = current.registrationOpenedAt ?? current.publishedAt;
             const fields = { clubId: this.clubId, trainingId: current.id, chatId: current.chatId };
             if (!openedAt) {
