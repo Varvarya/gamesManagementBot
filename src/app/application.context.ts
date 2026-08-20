@@ -286,6 +286,13 @@ export class ApplicationContext {
             },
         );
 
+        this.bot.on('edited_message', async (ctx) => {
+            if (ctx.chat.type === 'private') return;
+            const runtime = await this.findRuntimeForChat(ctx.chat.id);
+            if (runtime) await runtime.groupRegistration.handle(ctx);
+            else if ('text' in ctx.editedMessage && /^[+-]/.test(ctx.editedMessage.text.trim())) logger.warn('telegram.registration.club_not_resolved', { chatId: ctx.chat.id, telegramUserId: ctx.from?.id, updateId: ctx.update.update_id, edited: true });
+        });
+
         this.bot.catch(
             async (error, ctx) => {
                 logger.error('telegram.update_failed', { updateId: ctx.update.update_id, error });

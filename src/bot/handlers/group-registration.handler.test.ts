@@ -54,7 +54,13 @@ function createHarness(options: { resolution?: unknown; executeError?: Error; de
         callbackQuery: { id: 'callback', data: callback, from: { id: userId }, chat_instance: 'x', message: { message_id: replies.at(-1)?.messageId, chat: { id: -100, type: 'supergroup' }, date: 0 } },
         update: { update_id: 999, callback_query: {} }, answerCbQuery: async () => undefined,
     } as unknown as Context);
-    return { handler, cleanup, replies, deleted, refreshed, executions, messageContext, callbackContext };
+    const editedMessageContext = (text: string, messageId = 700, userId = 1, updateId = 1700) => ({
+        from: { id: userId, first_name: `Player ${userId}` }, chat: { id: -100, type: 'supergroup' }, telegram,
+        editedMessage: { message_id: messageId, text, edit_date: 1, date: 0, from: { id: userId, first_name: `Player ${userId}` }, chat: { id: -100, type: 'supergroup' } },
+        update: { update_id: updateId, edited_message: {} },
+        reply: async (replyText: string, extra?: unknown) => { const botMessageId = nextBotMessageId++; replies.push({ text: replyText, messageId: botMessageId, extra }); return { message_id: botMessageId, chat: { id: -100, type: 'supergroup' } }; },
+    } as unknown as Context);
+    return { handler, cleanup, replies, deleted, refreshed, executions, messageContext, editedMessageContext, callbackContext };
 }
 
 const waitForTimers = () => new Promise((resolve) => setTimeout(resolve, 20));
@@ -134,6 +140,21 @@ test('normal +1 and -1 still execute and refresh the persistent training card', 
     assert.deepEqual(h.refreshed, ['training-a', 'training-a']);
     assert.deepEqual(h.replies, []);
     assert.deepEqual(h.deleted, []);
+});
+
+test('bare plus executes exactly like +1', async () => {
+    const h = createHarness();
+    await h.handler.handle(h.messageContext('+', 1, 503));
+    assert.deepEqual(h.executions, ['training-a']);
+    assert.deepEqual(h.refreshed, ['training-a']);
+    assert.deepEqual(h.replies, []);
+});
+
+test('a message edited into bare plus is rechecked and processed as +1', async () => {
+    const h = createHarness();
+    await h.handler.handle(h.editedMessageContext('+'));
+    assert.deepEqual(h.executions, ['training-a']);
+    assert.deepEqual(h.refreshed, ['training-a']);
 });
 
 test('commands are silently ignored when no applicable active training exists', async () => {

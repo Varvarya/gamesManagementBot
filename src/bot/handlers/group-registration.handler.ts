@@ -28,8 +28,7 @@ export class GroupRegistrationHandler {
     async handle(
         ctx: Context,
     ): Promise<void> {
-        const message =
-            ctx.message;
+        const message = ctx.message ?? ctx.editedMessage;
 
         if (
             !message ||

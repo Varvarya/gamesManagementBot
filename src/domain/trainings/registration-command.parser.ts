@@ -101,10 +101,11 @@ export class RegistrationCommandParser {
             return { sign: numeric.sign, count: Number(numeric.countToken), remaining: replaceSpan(text, numeric.start, numeric.length) };
         }
 
-        // Preserve the established shorthand forms: "-", "- я", and "- Name".
+        // Preserve the established shorthand forms and accept a bare "+" as +1.
         const legacyRemove = text.match(/^-\s*(.*)$/u);
         if (legacyRemove) return { sign: '-', count: 1, remaining: legacyRemove[1] };
-        if (/^\+/u.test(text)) throw new RegistrationCommandParseError('Можна додати або зняти від 1 до 4 місць.');
+        const legacyAdd = text.match(/^\+\s*(.*)$/u);
+        if (legacyAdd) return { sign: '+', count: 1, remaining: legacyAdd[1] };
         return undefined;
     }
 

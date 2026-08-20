@@ -61,6 +61,15 @@ test('date variants, time ranges, action spacing, arbitrary order, and ordinary-
     assert.equal(parser.parse('+1 18:00-20:00')?.trainingHint?.endTime, '20:00');
 });
 
+test('bare plus is the +1 self-registration shorthand', () => {
+    const command = parser.parse('+');
+    assert.equal(parser.hasOperation('+'), true);
+    assert.equal(command?.operation, 'add');
+    assert.equal(command?.count, 1);
+    assert.equal(command?.targetType, 'self');
+    assert.deepEqual(command?.targetNames, []);
+});
+
 test('critical messy command constrains the existing resolver to the unique club-local training', async () => {
     const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Kyiv', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
     const makeTraining = (id: string, startTime: string): Training => ({
