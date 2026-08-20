@@ -65,6 +65,7 @@ export class TrainingService {
         training.messageId = input.messageId;
         training.status = 'open';
         training.publishedAt = now;
+        training.registrationOpenedAt ??= now;
         training.scheduledPublicationAt = undefined;
         training.publicationStale = false;
         training.updatedAt = now;

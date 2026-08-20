@@ -64,6 +64,8 @@ export type Training = {
 
     createdAt: string;
     publishedAt?: string;
+    /** Durable lower boundary for registration history reconciliation. */
+    registrationOpenedAt?: string;
     scheduledPublicationAt?: string;
     publicationStale?: boolean;
     updatedAt: string;

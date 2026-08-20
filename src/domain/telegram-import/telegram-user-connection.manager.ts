@@ -14,7 +14,8 @@ import { logger } from '../../utils/logger';
 import { classifyTelegramAuthError, isRetryableTelegramAuthFailure, normalizeTelegramCode, normalizeTelegramPhone, readTelegramMtprotoConfig, safeTelegramErrorDetails, TelegramAuthError, TelegramMtprotoConfig } from './telegram-auth-error';
 
 export type TelegramAuthenticationStage = 'starting' | 'code' | 'password' | 'completed' | 'failed';
-export type TelegramHistoryMessage = { messageId: number; date: Date; text: string; telegramUser: { id: number; first_name?: string; username?: string } };
+export type TelegramHistoryMessage = { messageId: number; date: Date; text: string; replyToMessageId?: number; telegramUser: { id: number; first_name?: string; username?: string } };
+export type TelegramHistoryBatch = { messages: TelegramHistoryMessage[]; complete: boolean };
 type Deferred = { promise: Promise<string>; resolve(value: string): void };
 type AuthFlow = { clubId: string; requestedBy: number; client: TelegramClient; code: Deferred; password: Deferred; stage: TelegramAuthenticationStage; stageWaiters: Array<(stage: TelegramAuthenticationStage) => void>; error?: TelegramAuthError; expiresAt: number };
 
@@ -149,7 +150,7 @@ export class TelegramUserConnectionManager {
         return this.withClient(connection, async (client) => { const loader = new TelegramParticipantLoader(client); const dialog = (await loader.listGroups()).find((item) => item.id === source.telegramChatId); if (!dialog) throw new Error('TELEGRAM_IMPORT_SOURCE_UNAVAILABLE'); const [loaded, contacts] = await Promise.all([loader.load(dialog), new TelegramContactsLoader(client).load()]); return { participants: loaded.participants, contacts, partial: loaded.partial }; });
     }
 
-    async readRecentMessages(clubId: string, chatId: number, since: Date, limit = 200, afterMessageId?: number): Promise<TelegramHistoryMessage[]> {
+    async readRecentMessages(clubId: string, chatId: number, since: Date, limit = 200, afterMessageId?: number): Promise<TelegramHistoryBatch> {
         const source = (await this.sources.listByClub(clubId)).find((item) => item.telegramChatId === String(chatId));
         if (!source) throw new Error('TELEGRAM_RECOVERY_SOURCE_UNAVAILABLE');
         const connection = await this.requiredConnection(source.connectionId);
@@ -167,9 +168,13 @@ export class TelegramUserConnectionManager {
                 if (!(sender instanceof Api.User) || sender.bot || sender.deleted || sender.self) continue;
                 const id = Number(sender.id.toString());
                 if (!Number.isSafeInteger(id) || id <= 0) continue;
-                result.push({ messageId: Number(message.id), date, text: message.message, telegramUser: { id, first_name: sender.firstName, username: sender.username } });
+                const replyToMessageId = Number(message.replyTo?.replyToMsgId);
+                result.push({ messageId: Number(message.id), date, text: message.message, replyToMessageId: Number.isSafeInteger(replyToMessageId) && replyToMessageId > 0 ? replyToMessageId : undefined, telegramUser: { id, first_name: sender.firstName, username: sender.username } });
             }
-            return result;
+            // A full page may have older messages which were not returned. Be
+            // deliberately conservative: partial history must never replace a
+            // valid persisted registration list.
+            return { messages: result, complete: values.length < limit };
         });
     }
 

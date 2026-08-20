@@ -15,6 +15,7 @@ import {
 } from '../keyboards/training.keyboard';
 import { getZonedNow } from '../../../domain/templates/template-scheduler.service';
 import { TrainingCancellationScheduler } from '../../../scheduler/training-cancellation.scheduler';
+import { RegistrationRecoveryService } from '../../../domain/trainings/registration-recovery.service';
 import {
     formatDate,
     formatTimeRange,
@@ -27,6 +28,7 @@ export class AdminTrainingHandler {
         private readonly services: ServicesContext,
         private readonly publisher: TrainingPublisherService,
         private readonly cancellationScheduler?: TrainingCancellationScheduler,
+        private readonly registrationRecovery?: RegistrationRecoveryService,
     ) {
         this.services.adminUi.setTrainingCardRenderer(async (trainingId) => {
             const training = await this.services.trainings.getRequired(trainingId);
@@ -49,6 +51,7 @@ export class AdminTrainingHandler {
             callback.startsWith(AdminCallbacks.TrainingFinishPrefix) ||
             callback.startsWith(AdminCallbacks.TrainingCancelPrefix) ||
             callback.startsWith(AdminCallbacks.TrainingRefreshPrefix) ||
+            callback.startsWith(AdminCallbacks.TrainingReconcilePrefix) ||
             callback.startsWith(AdminCallbacks.TrainingRepublishPrefix) ||
             callback.startsWith(AdminCallbacks.TrainingClosePrefix) ||
             callback.startsWith(AdminCallbacks.TrainingOpenPrefix) ||
@@ -163,6 +166,17 @@ export class AdminTrainingHandler {
             );
 
             await this.showSuccess(ctx, trainingId, 'Оголошення тренування оновлено.');
+            return;
+        }
+
+        if (callback.startsWith(AdminCallbacks.TrainingReconcilePrefix)) {
+            const trainingId = callback.slice(AdminCallbacks.TrainingReconcilePrefix.length);
+            if (!this.registrationRecovery) throw new Error('REGISTRATION_RECONCILIATION_UNAVAILABLE');
+            const result = await this.registrationRecovery.reconcileTraining(trainingId);
+            const change = result.stateChanged
+                ? `Активні місця: ${result.previousActivePlaces} → ${result.newActivePlaces}; очікування: ${result.previousWaitingPlaces} → ${result.newWaitingPlaces}.`
+                : 'Змін не знайдено.';
+            await this.showSuccess(ctx, trainingId, `✅ Записи перевірено\n${change}`);
             return;
         }
 

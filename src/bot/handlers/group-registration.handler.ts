@@ -11,6 +11,7 @@ import { Training } from '../../domain/trainings/training.types';
 import { ProcessedRegistrationMessageStore } from '../../domain/trainings/processed-registration-message.store';
 import { RegistrationResolution } from '../../domain/trainings/registration.service';
 import { RegistrationReviewService, registrationReviewRecipients } from '../../domain/trainings/registration-review.service';
+import { TrainingRegistrationLock } from '../../domain/trainings/training-registration-lock';
 
 export class GroupRegistrationHandler {
     private readonly handledUpdates =
@@ -23,6 +24,7 @@ export class GroupRegistrationHandler {
         private readonly cleanup: RegistrationMessageCleanup = new RegistrationMessageCleanup(),
         private readonly processed?: ProcessedRegistrationMessageStore,
         private readonly reviews?: RegistrationReviewService,
+        private readonly registrationLock = new TrainingRegistrationLock(),
     ) {}
 
     async handle(
@@ -109,7 +111,7 @@ export class GroupRegistrationHandler {
                     return { value: resolution, status: 'pending_ambiguity' as const };
                 }
                 if (resolution.kind === 'select') return { value: resolution, status: 'pending_ambiguity' as const };
-                await this.services.registration.executeCommandAgainstTraining(input, resolution.training.id);
+                await this.registrationLock.run(resolution.training.id, () => this.services.registration.executeCommandAgainstTraining(input, resolution.training.id));
                 return { value: resolution, trainingId: resolution.training.id };
             };
             const processed = this.processed
@@ -172,7 +174,7 @@ export class GroupRegistrationHandler {
         }
         try {
             const input = { telegramUser: pending.telegramUser, chatId: pending.chatId, command: pending.command };
-            const results = await this.services.registration.executeCommandAgainstTraining(input, pending.trainingId);
+            const results = await this.registrationLock.run(pending.trainingId, () => this.services.registration.executeCommandAgainstTraining(input, pending.trainingId));
             const training = results[0]?.training;
             if (training) await this.publisher.refreshMessage(training.id);
             this.selections.complete(pending.requestId);

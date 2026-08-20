@@ -48,6 +48,7 @@ export function createTrainingKeyboard(
                 `${AdminCallbacks.TrainingRemovePlayerPrefix}${training.id}`,
             ),
         ]] : []),
+        ...(training.status === 'open' && training.messageId ? [[Markup.button.callback('🔄 Перевірити записи в чаті', `${AdminCallbacks.TrainingReconcilePrefix}${training.id}`)]] : []),
         ...((training.status === 'open' || training.status === 'closed') ? [[
             Markup.button.callback('✏️ Змінити', `${AdminCallbacks.TrainingEditPrefix}${training.id}`),
             ...(registrationButton ? [registrationButton] : []),

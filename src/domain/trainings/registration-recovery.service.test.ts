@@ -3,7 +3,6 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-
 import { ServicesContext } from '../../app/services.context';
 import { JsonStorage } from '../../storage/jsonStorage';
 import { TelegramHistoryMessage } from '../telegram-import/telegram-user-connection.manager';
@@ -12,75 +11,82 @@ import { RegistrationRecoveryService } from './registration-recovery.service';
 import { TrainingPublisherService } from './training-publisher.service';
 import { Training } from './training.types';
 
-function training(): Training {
+function initial(): Training {
     const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Kyiv', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
-    return { id: 'training', clubId: 'club', chatId: -100, messageId: 42, title: 'Training', date: today, startTime: '17:30', endTime: '19:30', placesLimit: 20, minPlayers: 1, status: 'open', participants: [], waitlist: [], createdAt: '2026-08-19T11:00:00.000Z', publishedAt: '2026-08-19T12:00:00.000Z', updatedAt: '' };
+    return { id: 'training', clubId: 'club', chatId: -100, messageId: 42, title: 'Training', date: today, startTime: '17:30', endTime: '19:30', placesLimit: 4, minPlayers: 1, status: 'open', participants: [], waitlist: [], createdAt: '2026-08-19T11:00:00.000Z', publishedAt: '2026-08-19T12:00:00.000Z', registrationOpenedAt: '2026-08-19T12:00:00.000Z', updatedAt: '' };
+}
+function msg(messageId: number, text: string, minute: number, user = 7): TelegramHistoryMessage {
+    return { messageId, text, date: new Date(`2026-08-19T13:${String(minute).padStart(2, '0')}:00Z`), telegramUser: { id: user, first_name: user === 7 ? 'Volodymyr' : `User ${user}` } };
 }
 
-function message(messageId: number, text: string, minute: number): TelegramHistoryMessage {
-    return { messageId, text, date: new Date(`2026-08-19T13:${String(minute).padStart(2, '0')}:00.000Z`), telegramUser: { id: 7, first_name: 'User' } };
-}
-
-async function harness(messages: TelegramHistoryMessage[], directory?: string) {
-    const root = directory ?? await fs.mkdtemp(path.join(os.tmpdir(), 'registration-recovery-'));
-    const value = training(); let places = 0; let openedAt: Date | undefined; let afterMessageId: number | undefined; let refreshes = 0;
-    const registration = {
-        resolveCommand: async (input: { command: { trainingHint?: { time?: string } } }) => input.command.trainingHint?.time && input.command.trainingHint.time !== value.startTime ? { kind: 'none', reason: 'NO_OPEN_TRAINING' } : { kind: 'ready', training: value },
-        executeCommandAgainstTraining: async (input: { command: { operation: 'add' | 'remove'; count: number } }) => { places = input.command.operation === 'add' ? places + input.command.count : Math.max(0, places - input.command.count); return []; },
+async function harness(messages: TelegramHistoryMessage[], complete = true, seed = initial()) {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'reconcile-'));
+    let value = structuredClone(seed); let refreshes = 0; let saves = 0;
+    const players = new Map<number, { id: string; displayName: string; telegramUserId: number }>();
+    const playerService = {
+        findOrCreateByTelegramUser: async (u: { id: number; first_name?: string }) => { const p = players.get(u.id) ?? { id: `p${u.id}`, displayName: u.first_name ?? String(u.id), telegramUserId: u.id }; players.set(u.id, p); return p; },
+        findByTelegramId: async (id: number) => players.get(id),
+        resolveOrCreateTelegramGuest: async (name: string) => ({ id: `guest:${name}`, displayName: name, aliases: [], isConfirmed: false, isActive: true, createdAt: '', updatedAt: '' }),
+        resolveByStrongName: async () => undefined,
     };
-    const services = { repositories: { trainings: { list: async () => [value] } }, registration } as unknown as ServicesContext;
+    const services = {
+        players: playerService,
+        trainings: { getRequired: async () => structuredClone(value), listRelevantOpenByChatId: async () => [structuredClone(value)] },
+        repositories: {
+            clubId: 'club',
+            trainings: { list: async () => [structuredClone(value)], save: async (next: Training) => { saves++; value = structuredClone(next); return next; } },
+            settings: { get: async () => ({ timezone: 'Europe/Kyiv', admins: [] }) },
+        },
+    } as unknown as ServicesContext;
+    const history = { readRecentMessages: async () => ({ messages, complete }) };
     const publisher = { refreshMessage: async () => { refreshes++; } } as unknown as TrainingPublisherService;
-    const history = { readRecentMessages: async (_clubId: string, _chatId: number, since: Date, _limit: number, afterId?: number) => { openedAt = since; afterMessageId = afterId; return messages; } };
     const store = new ProcessedRegistrationMessageStore(new JsonStorage({ dataDir: root, storageSlug: 'club' }));
     const recovery = new RegistrationRecoveryService('club', services, publisher, history as never, store);
-    return { root, recovery, store, get places() { return places; }, get openedAt() { return openedAt; }, get afterMessageId() { return afterMessageId; }, get refreshes() { return refreshes; } };
+    return { recovery, get training() { return value; }, get refreshes() { return refreshes; }, get saves() { return saves; } };
 }
 
-test('real missed messy message is applied once and remains processed after store restart', async () => {
-    const missed = message(101, 'сегодня 17-30, +4  )))', 15);
-    const first = await harness([missed]);
-    await first.recovery.recoverActive();
-    assert.equal(first.places, 4);
-    assert.equal(first.openedAt?.toISOString(), '2026-08-19T12:00:00.000Z');
-    assert.equal(first.afterMessageId, 42);
-    assert.equal(await first.store.has(-100, 101), true);
-
-    const second = await harness([missed], first.root);
-    await second.recovery.recoverActive();
-    assert.equal(second.places, 0, 'persisted marker prevents replay after restart');
-    assert.equal(second.refreshes, 1, 'restart still rewrites the final registration card');
-});
-
-test('recovery replays oldest to newest and ignores mixed unrelated chat', async () => {
-    const ordered = await harness([message(46, '-2', 15), message(44, '+1', 5), message(43, '+1', 0), message(45, '+1', 10)]);
-    await ordered.recovery.recoverActive();
-    assert.equal(ordered.places, 1);
-
-    const mixed = await harness([message(50, 'дякую', 0), message(51, 'сегодня 17-30, +4  )))', 5), message(52, 'хто сьогодні буде?', 10), message(53, '-1', 15), message(54, '😂', 20)]);
-    await mixed.recovery.recoverActive();
-    assert.equal(mixed.places, 3);
-});
-
-test('recovery never accepts messages sent before the bot registration card', async () => {
-    const h = await harness([message(40, '+4', 10), message(42, '+4', 11), message(43, '+1', 12)]);
-    await h.recovery.recoverActive();
-    assert.equal(h.places, 1);
-    assert.equal(await h.store.has(-100, 40), false);
-    assert.equal(await h.store.has(-100, 42), false);
-    assert.equal(await h.store.has(-100, 43), true);
-});
-
-test('concurrent live/recovery claims execute a message only once', async () => {
-    const h = await harness([]); let calls = 0;
-    const action = async () => { calls++; await Promise.resolve(); return { value: true, trainingId: 'training' }; };
-    const results = await Promise.all([h.store.processOnce(-100, 500, action), h.store.processOnce(-100, 500, action)]);
-    assert.equal(calls, 1);
-    assert.equal(results.filter((item) => item.duplicate).length, 1);
-});
-
-test('restart rewrites an active registration card even when there are no missed commands', async () => {
-    const h = await harness([]);
-    await h.recovery.recoverActive();
-    assert.equal(h.places, 0);
+test('restart rebuild applies missed conversational -1 chronologically', async () => {
+    const stale = initial();
+    stale.participants.push({ id: 'stale', playerId: 'p7', telegramUserId: 7, registeredByTelegramUserId: 7, displayName: 'Volodymyr', places: 1, source: 'telegram_self', status: 'active', createdAt: '', updatedAt: '' });
+    const h = await harness([msg(43, '+1', 11), msg(44, 'Перепрошую, сьогодні не зможу. -1', 13)], true, stale);
+    const result = await h.recovery.recoverTraining(h.training);
+    assert.equal(result.commandsApplied, 2);
+    assert.equal(result.newActivePlaces, 0);
+    assert.equal(h.training.participants.length, 0);
+    assert.equal(result.stateChanged, true);
     assert.equal(h.refreshes, 1);
+});
+
+test('repeated reconciliation is deterministic and does not duplicate +N', async () => {
+    const h = await harness([msg(43, '+2', 1), msg(44, '+1', 2, 8)]);
+    await h.recovery.recoverTraining(h.training);
+    assert.equal(h.training.participants.reduce((n, p) => n + p.places, 0), 3);
+    const saves = h.saves; const refreshes = h.refreshes;
+    const second = await h.recovery.recoverTraining(h.training);
+    assert.equal(second.stateChanged, false);
+    assert.equal(h.saves, saves);
+    assert.equal(h.refreshes, refreshes);
+});
+
+test('waitlist is rebuilt through normal capacity logic', async () => {
+    const h = await harness([msg(43, '+4', 1), msg(44, '+2', 2, 8), msg(45, '-1', 3)]);
+    const result = await h.recovery.recoverTraining(h.training);
+    assert.equal(result.newActivePlaces, 3);
+    assert.equal(result.newWaitingPlaces, 2);
+});
+
+test('partial history never overwrites persisted registration state', async () => {
+    const seed = initial();
+    seed.participants.push({ id: 'manual', playerId: 'm', displayName: 'Manual', places: 1, source: 'admin', status: 'active', createdAt: '', updatedAt: '' });
+    const h = await harness([msg(43, '+4', 1)], false, seed);
+    const result = await h.recovery.recoverTraining(h.training);
+    assert.equal(result.stateChanged, false);
+    assert.equal(h.saves, 0);
+    assert.equal(h.training.participants[0].source, 'admin');
+});
+
+test('messages at or before bot publication message are never replayed', async () => {
+    const h = await harness([msg(40, '+4', 1), msg(42, '+4', 2), msg(43, '+1', 3)]);
+    const result = await h.recovery.recoverTraining(h.training);
+    assert.equal(result.newActivePlaces, 1);
 });

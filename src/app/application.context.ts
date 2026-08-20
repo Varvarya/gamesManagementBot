@@ -54,6 +54,7 @@ import { ClubDiagnosticsService } from '../domain/clubs/club-diagnostics.service
 import { TelegramUserConnectionManager } from '../domain/telegram-import/telegram-user-connection.manager';
 import { ProcessedRegistrationMessageStore } from '../domain/trainings/processed-registration-message.store';
 import { RegistrationRecoveryService } from '../domain/trainings/registration-recovery.service';
+import { TrainingRegistrationLock } from '../domain/trainings/training-registration-lock';
 import { RegistrationReviewService, REGISTRATION_REVIEW_PREFIX } from '../domain/trainings/registration-review.service';
 import { TelegramPlayerImportService } from '../domain/telegram-import/telegram-player-import.service';
 import { TelegramPlayerImportHandler } from '../bot/admin/handlers/telegram-player-import.handler';
@@ -430,7 +431,9 @@ export class ApplicationContext {
         const playerFlow = new PlayerFlowHandler(services, publisher);
         const trainingFlow = new TrainingFlowHandler(services, publisher, scheduledTrainingPublications);
         const menu = new AdminMenuHandler(services, this.superAdminIds, this.sessionContexts, this.registrationReviews);
-        const training = new AdminTrainingHandler(services, publisher, cancellationScheduler);
+        const registrationLock = new TrainingRegistrationLock();
+        const registrationRecovery = new RegistrationRecoveryService(context.clubId, services, publisher, this.telegramUserConnections, processedRegistrationMessages, this.registrationReviews, 500, registrationLock);
+        const training = new AdminTrainingHandler(services, publisher, cancellationScheduler, registrationRecovery);
         const player = new AdminPlayerHandler(services);
         const playerData = new PlayerDataHandler(services, backups);
         const telegramPlayerImports = new TelegramPlayerImportService(context.clubId, repositories.players, this.telegramUserConnections, () => backups.create());
@@ -445,8 +448,7 @@ export class ApplicationContext {
         const superAdminConfig = new SuperAdminConfigHandler(services, configService, [...this.superAdminIds]);
         const callbackRouter = new AdminCallbackRouter(services, this.callbackAuthorization, context.clubId, this.sessionContexts, navigation, templateFlow, playerFlow, trainingFlow, menu, training, player, template, chat, settings, playerData, telegramPlayerImport, setup, exceptions);
         const textRouter = new AdminTextRouter(services, [chat, settingsFlow, superAdminConfig, playerData, telegramPlayerImport], [templateFlow, playerFlow, trainingFlow, settingsFlow, exceptions], this.superAdminIds, this.callbackAuthorization, context.clubId, this.sessionContexts, [settings]);
-        const groupRegistration = new GroupRegistrationHandler(services, publisher, this.registrationSelections, undefined, processedRegistrationMessages, this.registrationReviews);
-        const registrationRecovery = new RegistrationRecoveryService(context.clubId, services, publisher, this.telegramUserConnections, processedRegistrationMessages, this.registrationReviews);
+        const groupRegistration = new GroupRegistrationHandler(services, publisher, this.registrationSelections, undefined, processedRegistrationMessages, this.registrationReviews, registrationLock);
         return { context, publisher, templateScheduler, cancellationScheduler, scheduledTrainingPublications, menu, callbackRouter, textRouter, groupRegistration, registrationRecovery, superAdminConfig };
     }
 

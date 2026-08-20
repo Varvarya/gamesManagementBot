@@ -46,6 +46,9 @@ export class RegistrationReviewService {
         const token = callback.split(':')[2];
         return (await this.read()).find((item) => item.token === token);
     }
+    async findBySource(clubId: string, chatId: number, messageId: number): Promise<PendingRegistrationReview | undefined> {
+        return (await this.read()).find((item) => item.clubId === clubId && item.sourceChatId === chatId && item.sourceMessageId === messageId);
+    }
 
     async listPending(clubId: string): Promise<PendingRegistrationReview[]> { return (await this.read()).filter((item) => item.clubId === clubId && item.status === 'pending' && item.expiresAt > Date.now()); }
 
