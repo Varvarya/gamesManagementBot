@@ -23,17 +23,17 @@ function message(messageId: number, text: string, minute: number): TelegramHisto
 
 async function harness(messages: TelegramHistoryMessage[], directory?: string) {
     const root = directory ?? await fs.mkdtemp(path.join(os.tmpdir(), 'registration-recovery-'));
-    const value = training(); let places = 0; let openedAt: Date | undefined; let refreshes = 0;
+    const value = training(); let places = 0; let openedAt: Date | undefined; let afterMessageId: number | undefined; let refreshes = 0;
     const registration = {
         resolveCommand: async (input: { command: { trainingHint?: { time?: string } } }) => input.command.trainingHint?.time && input.command.trainingHint.time !== value.startTime ? { kind: 'none', reason: 'NO_OPEN_TRAINING' } : { kind: 'ready', training: value },
         executeCommandAgainstTraining: async (input: { command: { operation: 'add' | 'remove'; count: number } }) => { places = input.command.operation === 'add' ? places + input.command.count : Math.max(0, places - input.command.count); return []; },
     };
     const services = { repositories: { trainings: { list: async () => [value] } }, registration } as unknown as ServicesContext;
     const publisher = { refreshMessage: async () => { refreshes++; } } as unknown as TrainingPublisherService;
-    const history = { readRecentMessages: async (_clubId: string, _chatId: number, since: Date) => { openedAt = since; return messages; } };
+    const history = { readRecentMessages: async (_clubId: string, _chatId: number, since: Date, _limit: number, afterId?: number) => { openedAt = since; afterMessageId = afterId; return messages; } };
     const store = new ProcessedRegistrationMessageStore(new JsonStorage({ dataDir: root, storageSlug: 'club' }));
     const recovery = new RegistrationRecoveryService('club', services, publisher, history as never, store);
-    return { root, recovery, store, get places() { return places; }, get openedAt() { return openedAt; }, get refreshes() { return refreshes; } };
+    return { root, recovery, store, get places() { return places; }, get openedAt() { return openedAt; }, get afterMessageId() { return afterMessageId; }, get refreshes() { return refreshes; } };
 }
 
 test('real missed messy message is applied once and remains processed after store restart', async () => {
@@ -42,22 +42,32 @@ test('real missed messy message is applied once and remains processed after stor
     await first.recovery.recoverActive();
     assert.equal(first.places, 4);
     assert.equal(first.openedAt?.toISOString(), '2026-08-19T12:00:00.000Z');
+    assert.equal(first.afterMessageId, 42);
     assert.equal(await first.store.has(-100, 101), true);
 
     const second = await harness([missed], first.root);
     await second.recovery.recoverActive();
     assert.equal(second.places, 0, 'persisted marker prevents replay after restart');
-    assert.equal(second.refreshes, 0);
+    assert.equal(second.refreshes, 1, 'restart still rewrites the final registration card');
 });
 
 test('recovery replays oldest to newest and ignores mixed unrelated chat', async () => {
-    const ordered = await harness([message(4, '-2', 15), message(2, '+1', 5), message(1, '+1', 0), message(3, '+1', 10)]);
+    const ordered = await harness([message(46, '-2', 15), message(44, '+1', 5), message(43, '+1', 0), message(45, '+1', 10)]);
     await ordered.recovery.recoverActive();
     assert.equal(ordered.places, 1);
 
-    const mixed = await harness([message(10, 'дякую', 0), message(11, 'сегодня 17-30, +4  )))', 5), message(12, 'хто сьогодні буде?', 10), message(13, '-1', 15), message(14, '😂', 20)]);
+    const mixed = await harness([message(50, 'дякую', 0), message(51, 'сегодня 17-30, +4  )))', 5), message(52, 'хто сьогодні буде?', 10), message(53, '-1', 15), message(54, '😂', 20)]);
     await mixed.recovery.recoverActive();
     assert.equal(mixed.places, 3);
+});
+
+test('recovery never accepts messages sent before the bot registration card', async () => {
+    const h = await harness([message(40, '+4', 10), message(42, '+4', 11), message(43, '+1', 12)]);
+    await h.recovery.recoverActive();
+    assert.equal(h.places, 1);
+    assert.equal(await h.store.has(-100, 40), false);
+    assert.equal(await h.store.has(-100, 42), false);
+    assert.equal(await h.store.has(-100, 43), true);
 });
 
 test('concurrent live/recovery claims execute a message only once', async () => {
@@ -66,4 +76,11 @@ test('concurrent live/recovery claims execute a message only once', async () => 
     const results = await Promise.all([h.store.processOnce(-100, 500, action), h.store.processOnce(-100, 500, action)]);
     assert.equal(calls, 1);
     assert.equal(results.filter((item) => item.duplicate).length, 1);
+});
+
+test('restart rewrites an active registration card even when there are no missed commands', async () => {
+    const h = await harness([]);
+    await h.recovery.recoverActive();
+    assert.equal(h.places, 0);
+    assert.equal(h.refreshes, 1);
 });

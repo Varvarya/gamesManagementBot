@@ -149,7 +149,7 @@ export class TelegramUserConnectionManager {
         return this.withClient(connection, async (client) => { const loader = new TelegramParticipantLoader(client); const dialog = (await loader.listGroups()).find((item) => item.id === source.telegramChatId); if (!dialog) throw new Error('TELEGRAM_IMPORT_SOURCE_UNAVAILABLE'); const [loaded, contacts] = await Promise.all([loader.load(dialog), new TelegramContactsLoader(client).load()]); return { participants: loaded.participants, contacts, partial: loaded.partial }; });
     }
 
-    async readRecentMessages(clubId: string, chatId: number, since: Date, limit = 200): Promise<TelegramHistoryMessage[]> {
+    async readRecentMessages(clubId: string, chatId: number, since: Date, limit = 200, afterMessageId?: number): Promise<TelegramHistoryMessage[]> {
         const source = (await this.sources.listByClub(clubId)).find((item) => item.telegramChatId === String(chatId));
         if (!source) throw new Error('TELEGRAM_RECOVERY_SOURCE_UNAVAILABLE');
         const connection = await this.requiredConnection(source.connectionId);
@@ -157,12 +157,12 @@ export class TelegramUserConnectionManager {
         return this.withClient(connection, async (client) => {
             const dialog = (await new TelegramParticipantLoader(client).listGroups()).find((item) => item.id === source.telegramChatId);
             if (!dialog) throw new Error('TELEGRAM_IMPORT_SOURCE_UNAVAILABLE');
-            const values = await client.getMessages(dialog.entity, { limit });
+            const values = await client.getMessages(dialog.entity, { limit, minId: afterMessageId });
             const result: TelegramHistoryMessage[] = [];
             for (const message of values) {
                 const rawDate: unknown = message?.date;
                 const date = rawDate instanceof Date ? rawDate : new Date(Number(rawDate) * 1000);
-                if (!message?.message || message.out || Number.isNaN(date.getTime()) || date < since) continue;
+                if (!message?.message || message.out || Number.isNaN(date.getTime()) || date < since || (afterMessageId !== undefined && Number(message.id) <= afterMessageId)) continue;
                 const sender = await message.getSender();
                 if (!(sender instanceof Api.User) || sender.bot || sender.deleted || sender.self) continue;
                 const id = Number(sender.id.toString());

@@ -29,10 +29,14 @@ export class RegistrationRecoveryService {
         logger.info('registration.recovery_started', fields);
         let messages: TelegramHistoryMessage[];
         try {
-            messages = await this.connections.readRecentMessages(this.clubId, training.chatId, new Date(openedAt), this.historyLimit);
+            messages = await this.connections.readRecentMessages(this.clubId, training.chatId, new Date(openedAt), this.historyLimit, training.messageId);
+            // Telegram message IDs are monotonic inside a chat. The published
+            // registration card is the authoritative opening boundary.
+            messages = messages.filter((message) => message.messageId > training.messageId!);
         } catch (error) {
             const unavailable = error instanceof Error && ['TELEGRAM_RECOVERY_SOURCE_UNAVAILABLE', 'TELEGRAM_IMPORT_SOURCE_UNAVAILABLE'].includes(error.message);
             logger[unavailable ? 'warn' : 'error'](unavailable ? 'registration.recovery_unavailable' : 'registration.recovery_failed', { ...fields, error });
+            await this.rewriteRegistrationCard(training, fields);
             return;
         }
         let processedCount = 0; let skippedAlreadyProcessed = 0; let invalidCount = 0; let ambiguousCount = 0;
@@ -59,12 +63,21 @@ export class RegistrationRecoveryService {
                 if (result.duplicate) { skippedAlreadyProcessed++; continue; }
                 if (result.value.kind === 'ambiguous') { ambiguousCount++; continue; }
                 processedCount++;
-                await this.publisher.refreshMessage(result.value.trainingId);
                 logger.info('registration.recovery_message_processed', { ...fields, messageId: message.messageId });
             } catch (error) {
                 logger.warn('registration.recovery_message_skipped', { ...fields, messageId: message.messageId, reason: error instanceof Error ? error.message : String(error) });
             }
         }
-        logger.info('registration.recovery_completed', { ...fields, scannedCount: messages.length, processedCount, skippedAlreadyProcessed, invalidCount, ambiguousCount });
+        await this.rewriteRegistrationCard(training, fields);
+        logger.info('registration.recovery_completed', { ...fields, openingMessageId: training.messageId, scannedCount: messages.length, processedCount, skippedAlreadyProcessed, invalidCount, ambiguousCount });
+    }
+
+    private async rewriteRegistrationCard(training: Training, fields: { clubId: string; trainingId: string; chatId: number }): Promise<void> {
+        try {
+            await this.publisher.refreshMessage(training.id);
+            logger.info('registration.recovery_card_rewritten', { ...fields, messageId: training.messageId });
+        } catch (error) {
+            logger.warn('registration.recovery_card_rewrite_failed', { ...fields, messageId: training.messageId, error });
+        }
     }
 }
