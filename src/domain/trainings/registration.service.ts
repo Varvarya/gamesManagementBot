@@ -47,7 +47,15 @@ export class RegistrationService {
         let candidates = await this.trainings.listRelevantOpenByChatId(input.chatId);
         if (!candidates.length) return { kind: 'none', reason: 'NO_APPLICABLE_TRAINING' };
         if (input.command.operation === 'remove') candidates = await this.filterRemovableCandidates(candidates, input);
+        if (!candidates.length) return { kind: 'none', reason: input.command.operation === 'remove' ? 'NO_REMOVABLE_REGISTRATION' : 'NO_APPLICABLE_TRAINING' };
         const hint = input.command.trainingHint;
+        // A human-supplied time is a selector only when there is something to
+        // select between. Do not reject the sole real registration target for
+        // an approximate time (or relative-day wording). A concrete calendar
+        // date remains authoritative because it clearly addresses another day.
+        if (candidates.length === 1 && !hasConflictingConcreteDate(candidates[0], hint)) {
+            return { kind: 'ready', training: candidates[0] };
+        }
         if (hint) {
             const timezone = await this.timezone();
             const hinted = candidates.filter((training) => matchesTrainingHint(training, hint, timezone));
@@ -182,6 +190,16 @@ export class RegistrationService {
 }
 
 function toMinutes(value: string): number { const [hour, minute] = value.split(':').map(Number); return hour * 60 + minute; }
+
+function hasConflictingConcreteDate(training: Training, hint?: NonNullable<RegistrationCommand['trainingHint']>): boolean {
+    if (!hint?.date) return false;
+    if (/^\d{4}-/.test(hint.date)) return training.date !== hint.date;
+    if (/^\d{2}\.\d{2}$/.test(hint.date)) {
+        const [, month, day] = training.date.match(/^\d{4}-(\d{2})-(\d{2})$/) ?? [];
+        return `${day}.${month}` !== hint.date;
+    }
+    return false;
+}
 
 function matchesTrainingHint(training: Training, hint: NonNullable<RegistrationCommand['trainingHint']>, timezone: string): boolean {
     if (hint.time && training.startTime !== hint.time) return false;

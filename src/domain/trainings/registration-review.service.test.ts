@@ -18,7 +18,7 @@ const parser = new RegistrationCommandParser();
 const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Kyiv', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 const training = (id: string, startTime: string): Training => ({ id, clubId: 'club', chatId: -100, messageId: 42, title: id, date: today(), startTime, endTime: '20:00', placesLimit: 20, minPlayers: 1, status: 'open', participants: [], waitlist: [], createdAt: '', publishedAt: '', updatedAt: '' });
 
-test('resolver classifies exact, clear, nearby, multiple-nearby, and distant explicit times safely', async () => {
+test('resolver prioritizes a sole target and reviews noisy time only when multiple targets exist', async () => {
     let values = [training('evening', '18:00')];
     const trainings = { listRelevantOpenByChatId: async () => values } as unknown as TrainingService;
     const service = new RegistrationService({} as PlayerService, trainings, {} as TrainingParticipantsService, async () => 'Europe/Kyiv');
@@ -26,9 +26,9 @@ test('resolver classifies exact, clear, nearby, multiple-nearby, and distant exp
     assert.equal((await resolve('сегодня 18:00 +1')).kind, 'ready');
     assert.equal((await resolve('сегодня +1')).kind, 'ready');
     const near = await resolve('сегодня 17-30, +4  )))');
-    assert.equal(near.kind, 'suspicious');
-    assert.equal(near.kind === 'suspicious' && near.suggestedTraining?.id, 'evening');
-    assert.equal((await resolve('сегодня 16:00 +1')).kind, 'none', 'outside tolerance is never silently guessed');
+    assert.equal(near.kind, 'ready');
+    assert.equal(near.kind === 'ready' && near.training.id, 'evening');
+    assert.equal((await resolve('сегодня 16:00 +1')).kind, 'ready', 'a noisy time cannot eliminate the sole real target');
     values = [training('early', '17:00'), training('late', '18:00')];
     const multiple = await resolve('сегодня 17:30 +1');
     assert.equal(multiple.kind, 'suspicious');

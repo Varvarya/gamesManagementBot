@@ -95,7 +95,10 @@ export class TemplateSchedulerService {
     ): Promise<void> {
         this.cancelTemplateJobs(template.clubId, template.id);
 
-        if (!template.enabled) return;
+        if (!template.enabled) {
+            logger.info('training_publication.skipped', { clubId: template.clubId, templateId: template.id, reason: 'TEMPLATE_PAUSED' });
+            return;
+        }
         if (!template.slots.length) {
             throw new Error(`Template ${template.id} has no slots`);
         }
@@ -103,7 +106,10 @@ export class TemplateSchedulerService {
         const { timezone } = await this.settings.get();
 
         for (const slot of template.slots) {
-            if (!slot.enabled) continue;
+            if (!slot.enabled) {
+                logger.info('training_publication.skipped', { clubId: template.clubId, templateId: template.id, slotId: slot.id, reason: 'SLOT_DISABLED' });
+                continue;
+            }
             this.scheduleSlot(template, slot, timezone);
 
             if (publishMissed) {
@@ -170,7 +176,7 @@ export class TemplateSchedulerService {
                     );
 
                     if (!currentTemplate.enabled || !currentSlot?.enabled) {
-                        logger.info('training_publication.skipped', { jobId, clubId: currentTemplate.clubId, templateId: currentTemplate.id, slotId: slot.id, reason: 'template_or_slot_disabled' });
+                        logger.info('training_publication.skipped', { jobId, clubId: currentTemplate.clubId, templateId: currentTemplate.id, slotId: slot.id, reason: !currentTemplate.enabled ? 'TEMPLATE_PAUSED' : 'SLOT_DISABLED' });
                         this.scheduler.cancelTemplate(jobId);
                         return;
                     }
@@ -194,6 +200,23 @@ export class TemplateSchedulerService {
                 }
             },
         );
+        const scheduled = this.scheduler.getJobsSnapshot().find((job) => job.jobId === jobId);
+        logger.info('scheduler.slot_scheduled', {
+            clubId: template.clubId,
+            templateId: template.id,
+            slotId: slot.id,
+            trainingDate: nextTrainingDate,
+            trainingStart: resolved.startTime,
+            openAt: `${publicationDate}T${resolved.publishTime}`,
+            timezone,
+            now: `${zonedNow.date}T${zonedNow.time}`,
+            jobId,
+            nextRunAt: scheduled?.nextRunAt,
+            jobRegistered: Boolean(scheduled),
+        });
+        if (!scheduled) {
+            logger.error('scheduler.slot_skipped', { clubId: template.clubId, templateId: template.id, slotId: slot.id, jobId, reason: 'JOB_NOT_REGISTERED' });
+        }
     }
 
     private async publishMissedIfRelevant(
@@ -235,13 +258,13 @@ export class TemplateSchedulerService {
         const exception = await this.exceptions?.findForOccurrence(slot.id, trainingDate);
         const occurrence = this.occurrenceResolver.resolveRecurring(template, slot, trainingDate, exception);
         if (!occurrence?.publicationEnabled) {
-            logger.info('training_publication.skipped', { clubId: template.clubId, templateId: template.id, slotId: slot.id, date: trainingDate, reason: exception?.type ?? 'paused' });
+            logger.info('training_publication.skipped', { clubId: template.clubId, templateId: template.id, slotId: slot.id, date: trainingDate, reason: exception?.type === 'cancel' ? 'TRAINING_CANCELLED' : 'OCCURRENCE_NOT_FOUND' });
             return;
         }
         // A changed publication time is handled by its one-off job, not by the recurring job.
         const resolved = resolveTemplateSlot(template, slot);
         if (exception?.type === 'override' && occurrence.publishTime !== resolved.publishTime) {
-            logger.info('training_publication.skipped', { clubId: template.clubId, templateId: template.id, slotId: slot.id, date: trainingDate, reason: 'publication_time_overridden' });
+            logger.info('training_publication.skipped', { clubId: template.clubId, templateId: template.id, slotId: slot.id, date: trainingDate, reason: 'OPEN_AT_OVERRIDDEN' });
             return;
         }
         await this.publishOccurrence(occurrence);
