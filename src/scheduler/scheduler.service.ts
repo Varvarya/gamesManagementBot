@@ -9,6 +9,9 @@ export type SchedulerTemplate = {
     dayOfWeek: number;
     publishTime: string;
     timezone: string;
+    clubId?: string;
+    templateId?: string;
+    slotId?: string;
 };
 export type SchedulerOneOff = { id: string; date: string; time: string; timezone: string };
 
@@ -18,31 +21,30 @@ type SchedulerPublishHandler =
 export class SchedulerService {
     private readonly jobs =
         new Map<string, Job>();
-    private readonly metadata = new Map<string, { timezone: string; cronExpression?: string; localPublishAt?: string }>();
+    private readonly metadata = new Map<string, { timezone: string; cronExpression?: string; localPublishAt?: string; expectedNextRunAt?: string }>();
 
     rescheduleTemplate(
         template: SchedulerTemplate,
         onPublish: SchedulerPublishHandler,
     ): void {
-        this.cancelTemplate(
-            template.id,
-        );
+        this.cancelTemplate(template.id, 'reschedule');
 
         const rule =
             this.createRule(
                 template,
             );
+        const expectedNextRunAt = rule.nextInvocationDate(new Date())?.toISOString();
 
         const job =
             schedule.scheduleJob(
                 rule,
                 async () => {
-                    logger.info('scheduler.job_started', { jobId: template.id });
+                    logger.info('scheduler.job_started', { jobId: template.id, clubId: template.clubId, templateId: template.templateId, slotId: template.slotId });
                     try {
                         await onPublish();
                         logger.info('scheduler.job_completed', { jobId: template.id });
                     } catch (error) {
-                        logger.error('scheduler.job_failed', { jobId: template.id, stage: 'execute', error });
+                        logger.error('scheduler.job_failed', { jobId: template.id, clubId: template.clubId, templateId: template.templateId, slotId: template.slotId, stage: 'execute', ...this.errorFields(error) });
                     }
                 },
             );
@@ -59,18 +61,26 @@ export class SchedulerService {
             job,
         );
         const cronDay = this.toNodeScheduleDay(template.dayOfWeek);
-        const cronExpression = `0 ${Number(template.publishTime.slice(3, 5))} ${Number(template.publishTime.slice(0, 2))} * * ${cronDay}`;
+        const [hour, minute, second] = this.parseTime(template.publishTime);
+        const cronExpression = `${second} ${minute} ${hour} * * ${cronDay}`;
         const nextRun = job.nextInvocation();
-        this.metadata.set(template.id, { timezone: template.timezone, cronExpression, localPublishAt: nextRun ? this.formatLocal(nextRun, template.timezone) : undefined });
-        logger.info('scheduler.job_scheduled', { jobId: template.id, dayOfWeek: template.dayOfWeek, publishTime: template.publishTime, timezone: template.timezone, cronExpression, localPublishAt: nextRun ? this.formatLocal(nextRun, template.timezone) : undefined, utcPublishAt: nextRun?.toISOString(), nextRunAt: nextRun?.toISOString(), jobRegistered: true });
+        const libraryNextRunAt = nextRun?.toISOString();
+        const isActive = job.pendingInvocations.length > 0;
+        this.metadata.set(template.id, { timezone: template.timezone, cronExpression, localPublishAt: nextRun ? this.formatLocal(nextRun, template.timezone) : undefined, expectedNextRunAt });
+        logger.info('scheduler.job_scheduled', { jobId: template.id, clubId: template.clubId, templateId: template.templateId, slotId: template.slotId, dayOfWeek: template.dayOfWeek, publishTime: template.publishTime, timezone: template.timezone, cronExpression, localPublishAt: nextRun ? this.formatLocal(nextRun, template.timezone) : undefined, expectedNextRunAt, libraryNextRunAt, nextRunAt: libraryNextRunAt, pendingInvocationCount: job.pendingInvocations.length, running: this.runningCount(job), isActive, jobRegistered: isActive });
+        if (!isActive) {
+            this.jobs.delete(template.id);
+            this.metadata.delete(template.id);
+            throw new Error(`Scheduled job has no pending invocation: ${template.id}`);
+        }
     }
 
     rescheduleOneOff(input: SchedulerOneOff, onPublish: SchedulerPublishHandler): void {
-        this.cancelTemplate(input.id);
+        this.cancelTemplate(input.id, 'reschedule');
         const [year, month, day] = input.date.split('-').map(Number);
-        const [hour, minute] = this.parseTime(input.time);
+        const [hour, minute, second] = this.parseTime(input.time);
         const rule = new schedule.RecurrenceRule();
-        rule.year = year; rule.month = month - 1; rule.date = day; rule.hour = hour; rule.minute = minute; rule.second = 0; rule.tz = input.timezone;
+        rule.year = year; rule.month = month - 1; rule.date = day; rule.hour = hour; rule.minute = minute; rule.second = second; rule.tz = input.timezone;
         const job = schedule.scheduleJob(rule, async () => {
             logger.info('scheduler.job_started', { jobId: input.id });
             try {
@@ -92,9 +102,7 @@ export class SchedulerService {
         logger.info('scheduler.one_off_scheduled', { jobId: input.id, date: input.date, time: input.time, timezone: input.timezone, computedNextPublishAt: job.nextInvocation()?.toISOString(), jobRegistered: true });
     }
 
-    cancelTemplate(
-        templateId: string,
-    ): void {
+    cancelTemplate(templateId: string, reason = 'explicit_cancel'): void {
         const job =
             this.jobs.get(
                 templateId,
@@ -105,12 +113,13 @@ export class SchedulerService {
         }
 
         job.cancel();
+        logger.info('scheduler.job_stopped', { jobId: templateId, reason });
 
         this.jobs.delete(
             templateId,
         );
         this.metadata.delete(templateId);
-        logger.info('scheduler.job_cancelled', { jobId: templateId });
+        logger.info(reason === 'reschedule' ? 'scheduler.job_replaced' : 'scheduler.job_removed', { jobId: templateId, reason });
     }
 
     cancelByPrefix(
@@ -125,15 +134,15 @@ export class SchedulerService {
             );
 
         for (const jobId of matchingIds) {
-            this.cancelTemplate(
-                jobId,
-            );
+            this.cancelTemplate(jobId, `prefix_cancel:${prefix}`);
         }
     }
 
     cancelAll(): void {
-        for (const job of this.jobs.values()) {
+        for (const [jobId, job] of this.jobs) {
             job.cancel();
+            logger.info('scheduler.job_stopped', { jobId, reason: 'cancel_all' });
+            logger.info('scheduler.job_removed', { jobId, reason: 'cancel_all' });
         }
 
         this.jobs.clear();
@@ -155,12 +164,24 @@ export class SchedulerService {
         ];
     }
 
-    getJobsSnapshot(): Array<{ jobId: string; nextRunAt?: string; timezone?: string; cronExpression?: string; localPublishAt?: string }> {
+    getJobsSnapshot(): Array<{ jobId: string; nextRunAt?: string; libraryNextRunAt?: string; expectedNextRunAt?: string; timezone?: string; cronExpression?: string; localPublishAt?: string; isActive: boolean; running: number }> {
         return [...this.jobs].map(([jobId, job]) => ({
             jobId,
             nextRunAt: job.nextInvocation()?.toISOString(),
+            libraryNextRunAt: job.nextInvocation()?.toISOString(),
+            isActive: job.pendingInvocations.length > 0,
+            running: this.runningCount(job),
             ...this.metadata.get(jobId),
         }));
+    }
+
+    private errorFields(error: unknown): { error: { name: string; message: string; stack?: string } } {
+        if (error instanceof Error) return { error: { name: error.name, message: error.message, stack: error.stack } };
+        return { error: { name: 'NonError', message: String(error) } };
+    }
+
+    private runningCount(job: Job): number {
+        return Number((job as Job & { running?: number }).running ?? 0);
     }
 
     private formatLocal(value: { toISOString(): string }, timezone: string): string {
@@ -177,6 +198,7 @@ export class SchedulerService {
         const [
             hours,
             minutes,
+            seconds,
         ] = this.parseTime(
             template.publishTime,
         );
@@ -191,7 +213,7 @@ export class SchedulerService {
 
         rule.hour = hours;
         rule.minute = minutes;
-        rule.second = 0;
+        rule.second = seconds;
         rule.tz = template.timezone;
 
         return rule;
@@ -199,10 +221,11 @@ export class SchedulerService {
 
     private parseTime(
         time: string,
-    ): [number, number] {
+    ): [number, number, number] {
         const [
             hoursRaw,
             minutesRaw,
+            secondsRaw = '0',
         ] = time.split(':');
 
         const hours =
@@ -210,14 +233,18 @@ export class SchedulerService {
 
         const minutes =
             Number(minutesRaw);
+        const seconds = Number(secondsRaw);
 
         if (
             !Number.isInteger(hours) ||
             !Number.isInteger(minutes) ||
+            !Number.isInteger(seconds) ||
             hours < 0 ||
             hours > 23 ||
             minutes < 0 ||
-            minutes > 59
+            minutes > 59 ||
+            seconds < 0 ||
+            seconds > 59
         ) {
             throw new Error(
                 `Invalid time format: ${time}`,
@@ -227,6 +254,7 @@ export class SchedulerService {
         return [
             hours,
             minutes,
+            seconds,
         ];
     }
 

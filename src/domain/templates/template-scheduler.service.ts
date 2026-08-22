@@ -165,6 +165,9 @@ export class TemplateSchedulerService {
                 ),
                 publishTime: resolved.publishTime,
                 timezone,
+                clubId: template.clubId,
+                templateId: template.id,
+                slotId: slot.id,
             },
             async () => {
                 try {
@@ -190,7 +193,7 @@ export class TemplateSchedulerService {
                     );
                     const currentPublicationDate = addCalendarDays(trainingDate, -currentResolved.publishDaysBefore);
 
-                    logger.info('scheduler.occurrence_resolved', { clubId: currentTemplate.clubId, templateId: currentTemplate.id, slotId: currentSlot.id, trainingDate, startTime: currentResolved.startTime, publishAt: `${currentPublicationDate}T${currentResolved.publishTime}`, timezone });
+                    logger.info('scheduler.job_occurrence_resolved', { clubId: currentTemplate.clubId, templateId: currentTemplate.id, slotId: currentSlot.id, trainingDate, startTime: currentResolved.startTime, publishAt: `${currentPublicationDate}T${currentResolved.publishTime}`, timezone });
                     logger.info('scheduler.publication_started', { jobId, clubId: currentTemplate.clubId, templateId: currentTemplate.id, slotId: currentSlot.id, trainingDate });
                     await this.publishSlot(currentTemplate, currentSlot, trainingDate);
                     logger.info('scheduler.publication_completed', { jobId, clubId: currentTemplate.clubId, templateId: currentTemplate.id, slotId: currentSlot.id, trainingDate });
