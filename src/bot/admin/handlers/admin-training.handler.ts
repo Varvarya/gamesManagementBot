@@ -12,6 +12,7 @@ import {
     createArchivedTrainingKeyboard,
     createTrainingWeekKeyboard,
     createTrainingEditKeyboard,
+    createTrainingReconcileConfirmKeyboard,
 } from '../keyboards/training.keyboard';
 import { getZonedNow } from '../../../domain/templates/template-scheduler.service';
 import { TrainingCancellationScheduler } from '../../../scheduler/training-cancellation.scheduler';
@@ -51,6 +52,7 @@ export class AdminTrainingHandler {
             callback.startsWith(AdminCallbacks.TrainingFinishPrefix) ||
             callback.startsWith(AdminCallbacks.TrainingCancelPrefix) ||
             callback.startsWith(AdminCallbacks.TrainingRefreshPrefix) ||
+            callback.startsWith(AdminCallbacks.TrainingReconcileConfirmPrefix) ||
             callback.startsWith(AdminCallbacks.TrainingReconcilePrefix) ||
             callback.startsWith(AdminCallbacks.TrainingRepublishPrefix) ||
             callback.startsWith(AdminCallbacks.TrainingClosePrefix) ||
@@ -169,14 +171,38 @@ export class AdminTrainingHandler {
             return;
         }
 
+        if (callback.startsWith(AdminCallbacks.TrainingReconcileConfirmPrefix)) {
+            const trainingId = callback.slice(AdminCallbacks.TrainingReconcileConfirmPrefix.length);
+            if (!this.registrationRecovery) throw new Error('REGISTRATION_RECONCILIATION_UNAVAILABLE');
+            const result = await this.registrationRecovery.forceReconcileTraining(trainingId);
+            if (!result.complete) {
+                const training = await this.services.trainings.getRequired(trainingId);
+                const card = await this.renderResolvedCard(training);
+                await this.services.adminUi.replaceWithError(ctx, `⚠️ Не вдалося повністю перечитати історію чату.\nСписок не змінено.\n\n${card.text}`, createTrainingKeyboard(training, card.truncated));
+                return;
+            }
+            const previous = result.previousActivePlaces + result.previousWaitingPlaces;
+            const current = result.newActivePlaces + result.newWaitingPlaces;
+            await this.showSuccess(ctx, trainingId, [
+                '✅ Список перезібрано', '', `Було: ${previous} місць`, `Стало: ${current} місць`, '',
+                `В основному списку: ${result.newActivePlaces}`, `У листі очікування: ${result.newWaitingPlaces}`, '',
+                `Відхилено некоректних записів: ${result.commandsRejected}`,
+            ].join('\n'));
+            return;
+        }
+
         if (callback.startsWith(AdminCallbacks.TrainingReconcilePrefix)) {
             const trainingId = callback.slice(AdminCallbacks.TrainingReconcilePrefix.length);
-            if (!this.registrationRecovery) throw new Error('REGISTRATION_RECONCILIATION_UNAVAILABLE');
-            const result = await this.registrationRecovery.reconcileTraining(trainingId);
-            const change = result.stateChanged
-                ? `Активні місця: ${result.previousActivePlaces} → ${result.newActivePlaces}; очікування: ${result.previousWaitingPlaces} → ${result.newWaitingPlaces}.`
-                : 'Змін не знайдено.';
-            await this.showSuccess(ctx, trainingId, `✅ Записи перевірено\n${change}`);
+            const training = await this.services.trainings.getRequired(trainingId);
+            if (training.status !== 'open' || training.messageId === undefined) {
+                await this.showTraining(ctx, training.id);
+                return;
+            }
+            await this.services.adminUi.show(ctx, [
+                '⚠️ Перезібрати список?', '',
+                'Бот перечитає повідомлення в чаті від моменту відкриття запису та заново сформує список за поточними правилами.', '',
+                'Некоректні або пропущені записи можуть бути видалені або додані.',
+            ].join('\n'), createTrainingReconcileConfirmKeyboard(training.id));
             return;
         }
 

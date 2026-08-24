@@ -86,7 +86,8 @@ test('partial history never overwrites persisted registration state', async () =
     const seed = initial();
     seed.participants.push({ id: 'manual', playerId: 'm', displayName: 'Manual', places: 1, source: 'admin', status: 'active', createdAt: '', updatedAt: '' });
     const h = await harness([msg(43, '+4', 1)], false, seed);
-    const result = await h.recovery.recoverTraining(h.training);
+    const result = await h.recovery.forceReconcileTraining(h.training.id);
+    assert.equal(result.complete, false);
     assert.equal(result.stateChanged, false);
     assert.equal(h.saves, 0);
     assert.equal(h.training.participants[0].source, 'admin');
@@ -113,8 +114,11 @@ test('startup reconciliation removes historical places with a mismatched explici
             try { records.push(JSON.parse(line) as Record<string, unknown>); } catch { /* not a structured application log */ }
         }
     };
-    try { await h.recovery.recoverActive(); } finally { console.info = originalInfo; }
+    let first;
+    try { first = await h.recovery.forceReconcileTraining(h.training.id); } finally { console.info = originalInfo; }
 
+    assert.equal(first.complete, true);
+    assert.equal(first.commandsRejected, 1);
     assert.equal(h.training.participants.reduce((sum, entry) => sum + entry.places, 0), 2);
     assert.equal(h.training.waitlist.length, 0);
     assert.equal(h.training.participants.some((entry) => entry.telegramUserId === 8), false);
@@ -124,10 +128,27 @@ test('startup reconciliation removes historical places with a mismatched explici
     assert.equal(records.some((entry) => entry.event === 'registration.added' && entry.telegramUserId === 8), false);
 
     const saves = h.saves;
-    await h.recovery.recoverActive();
+    const second = await h.recovery.forceReconcileTraining(h.training.id);
+    assert.equal(second.stateChanged, false);
     assert.equal(h.saves, saves);
     assert.equal(h.refreshes, 1);
     assert.equal(h.newPosts, 0);
+});
+
+test('forced rebuild preserves the manual admin baseline', async () => {
+    const seed = initial();
+    seed.startTime = '18:00';
+    seed.placesLimit = 10;
+    seed.participants.push({ id: 'manual', playerId: 'admin-player', displayName: 'Manual', places: 2, source: 'admin', status: 'active', createdAt: '', updatedAt: '' });
+    seed.participants.push({ id: 'stale', playerId: 'p8', telegramUserId: 8, registeredByTelegramUserId: 8, displayName: 'User 8', places: 4, source: 'telegram_self', status: 'active', createdAt: '', updatedAt: '' });
+    const h = await harness([msg(43, '+4 17:30', 1, 8), msg(44, '+1', 2, 9)], true, seed);
+
+    const result = await h.recovery.forceReconcileTraining(seed.id);
+
+    assert.equal(result.newActivePlaces, 3);
+    assert.equal(h.training.participants.find((entry) => entry.id === 'manual')?.places, 2);
+    assert.equal(h.training.participants.some((entry) => entry.telegramUserId === 8), false);
+    assert.equal(h.training.participants.some((entry) => entry.telegramUserId === 9), true);
 });
 
 test('replay counts commands without a time or with the exact start and ignores mismatches completely', async () => {

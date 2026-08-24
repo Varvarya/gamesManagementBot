@@ -125,8 +125,8 @@ export class RegistrationService {
     }
 
     private rejectExplicitTimeMismatch(training: Training, input: ExecuteRegistrationCommandInput): boolean {
-        const providedTime = input.command.hasExplicitTime ? input.command.trainingHint?.time : undefined;
-        if (!providedTime || normalizeClock(providedTime) === normalizeClock(training.startTime)) return false;
+        const providedTime = explicitRegistrationTimeMismatch(training, input.command);
+        if (!providedTime) return false;
         logger.info('registration.command_rejected', {
             trainingId: training.id,
             telegramUserId: input.telegramUser.id,
@@ -196,6 +196,12 @@ export class RegistrationService {
         if (training.status !== 'open') throw new Error('Training is not open');
         return training;
     }
+}
+
+export function explicitRegistrationTimeMismatch(training: Training, command: RegistrationCommand): string | undefined {
+    const providedTime = command.hasExplicitTime ? command.trainingHint?.time : undefined;
+    if (!providedTime || normalizeClock(providedTime) === normalizeClock(training.startTime)) return undefined;
+    return providedTime;
 }
 
 function normalizeClock(value: string): string {

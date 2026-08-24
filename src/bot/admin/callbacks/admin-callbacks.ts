@@ -139,6 +139,7 @@ export const AdminCallbacks = {
     TrainingCancelConfirmPrefix: 'tr:xc:',
     TrainingRefreshPrefix: 'tr:r:',
     TrainingReconcilePrefix: 'tr:check:',
+    TrainingReconcileConfirmPrefix: 'tr:check:ok:',
     TrainingRepublishPrefix: 'tr:pub:',
     TrainingFinishPrefix: 'tr:f:',
     TrainingParticipantsPrefix: 'tr:p:',

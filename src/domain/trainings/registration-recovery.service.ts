@@ -3,7 +3,7 @@ import { logger } from '../../utils/logger';
 import { TelegramHistoryBatch, TelegramHistoryMessage, TelegramUserConnectionManager } from '../telegram-import/telegram-user-connection.manager';
 import { registrationCommandParser, RegistrationCommandParseError } from './registration-command.parser';
 import { ProcessedRegistrationMessageStore } from './processed-registration-message.store';
-import { RegistrationService } from './registration.service';
+import { explicitRegistrationTimeMismatch, RegistrationService } from './registration.service';
 import { RegistrationReviewService, registrationReviewRecipients } from './registration-review.service';
 import { TrainingParticipantsService } from './training-participants.service';
 import { TrainingPublisherService } from './training-publisher.service';
@@ -12,7 +12,7 @@ import { ParticipantEntry, Training } from './training.types';
 import { TrainingService } from './training.service';
 
 export type RegistrationReconciliationResult = {
-    stateChanged: boolean; messagesScanned: number; commandsParsed: number; commandsApplied: number;
+    complete: boolean; stateChanged: boolean; messagesScanned: number; commandsParsed: number; commandsApplied: number; commandsRejected: number;
     pendingReviews: number; previousActivePlaces: number; newActivePlaces: number;
     previousWaitingPlaces: number; newWaitingPlaces: number;
 };
@@ -45,7 +45,25 @@ export class RegistrationRecoveryService {
         return this.recoverTraining(await this.services.trainings.getRequired(trainingId));
     }
 
-    async recoverTraining(training: Training): Promise<RegistrationReconciliationResult> {
+    async forceReconcileTraining(trainingId: string): Promise<RegistrationReconciliationResult> {
+        const training = await this.services.trainings.getRequired(trainingId);
+        const initial = resultFor(training);
+        logger.info('registration.force_reconciliation_started', forceFields(training, initial));
+        try {
+            const result = await this.recoverTraining(training, true);
+            if (!result.complete) {
+                logger.warn('registration.force_reconciliation_failed', { ...forceFields(training, result), reason: 'history_incomplete' });
+                return result;
+            }
+            logger.info('registration.force_reconciliation_completed', forceFields(training, result));
+            return result;
+        } catch (error) {
+            logger.error('registration.force_reconciliation_failed', { ...forceFields(training, initial), error });
+            throw error;
+        }
+    }
+
+    async recoverTraining(training: Training, failOnMessageRefresh = false): Promise<RegistrationReconciliationResult> {
         return this.lock.run(training.id, async () => {
             const current = await this.services.trainings.getRequired(training.id);
             const empty = resultFor(current);
@@ -85,7 +103,7 @@ export class RegistrationRecoveryService {
             const memory = new MemoryTrainingService(state);
             const participantService = new TrainingParticipantsService(memory as unknown as TrainingService);
             const registration = new RegistrationService(this.services.players, memory as unknown as TrainingService, participantService, async () => (await this.services.repositories.settings.get()).timezone);
-            let commandsParsed = 0; let commandsApplied = 0; let pendingReviews = 0;
+            let commandsParsed = 0; let commandsApplied = 0; let commandsRejected = 0; let pendingReviews = 0;
 
             for (const message of messages) {
                 let command;
@@ -93,6 +111,7 @@ export class RegistrationRecoveryService {
                 catch (error) { if (error instanceof RegistrationCommandParseError) continue; throw error; }
                 if (!command) continue;
                 commandsParsed++;
+                if (explicitRegistrationTimeMismatch(current, command)) commandsRejected++;
                 const input = { telegramUser: message.telegramUser, chatId: current.chatId, replyToMessageId: message.replyToMessageId, command };
                 try {
                     const existingReview = await this.reviews?.findBySource(this.clubId, current.chatId, message.messageId);
@@ -129,10 +148,13 @@ export class RegistrationRecoveryService {
                 rebuilt.updatedAt = new Date().toISOString();
                 await this.services.repositories.trainings.save(rebuilt);
                 try { await this.publisher.refreshMessage(rebuilt.id); }
-                catch (error) { logger.warn('registration.reconciliation_card_refresh_failed', { ...fields, error }); }
+                catch (error) {
+                    logger.warn('registration.reconciliation_card_refresh_failed', { ...fields, error });
+                    if (failOnMessageRefresh) throw error;
+                }
             }
             const result = {
-                stateChanged: changed, messagesScanned: messages.length, commandsParsed, commandsApplied, pendingReviews,
+                complete: true, stateChanged: changed, messagesScanned: messages.length, commandsParsed, commandsApplied, commandsRejected, pendingReviews,
                 previousActivePlaces: places(current.participants), newActivePlaces: places(rebuilt.participants),
                 previousWaitingPlaces: places(current.waitlist), newWaitingPlaces: places(rebuilt.waitlist),
             };
@@ -157,4 +179,7 @@ function places(entries: ParticipantEntry[]): number { return entries.reduce((su
 function compareMessages(a: TelegramHistoryMessage, b: TelegramHistoryMessage): number { return a.date.getTime() - b.date.getTime() || a.messageId - b.messageId; }
 function signature(entries: ParticipantEntry[]): unknown { return entries.map(({ id: _id, createdAt: _createdAt, updatedAt: _updatedAt, ...entry }) => entry); }
 function sameRegistrationState(a: Training, b: Training): boolean { return JSON.stringify([signature(a.participants), signature(a.waitlist)]) === JSON.stringify([signature(b.participants), signature(b.waitlist)]); }
-function resultFor(training: Training): RegistrationReconciliationResult { return { stateChanged: false, messagesScanned: 0, commandsParsed: 0, commandsApplied: 0, pendingReviews: 0, previousActivePlaces: places(training.participants), newActivePlaces: places(training.participants), previousWaitingPlaces: places(training.waitlist), newWaitingPlaces: places(training.waitlist) }; }
+function resultFor(training: Training): RegistrationReconciliationResult { return { complete: false, stateChanged: false, messagesScanned: 0, commandsParsed: 0, commandsApplied: 0, commandsRejected: 0, pendingReviews: 0, previousActivePlaces: places(training.participants), newActivePlaces: places(training.participants), previousWaitingPlaces: places(training.waitlist), newWaitingPlaces: places(training.waitlist) }; }
+function forceFields(training: Training, result: RegistrationReconciliationResult): Record<string, unknown> {
+    return { trainingId: training.id, chatId: training.chatId, ...result };
+}

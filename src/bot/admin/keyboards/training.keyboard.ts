@@ -48,7 +48,7 @@ export function createTrainingKeyboard(
                 `${AdminCallbacks.TrainingRemovePlayerPrefix}${training.id}`,
             ),
         ]] : []),
-        ...(training.status === 'open' && training.messageId ? [[Markup.button.callback('🔄 Перевірити записи в чаті', `${AdminCallbacks.TrainingReconcilePrefix}${training.id}`)]] : []),
+        ...(training.status === 'open' && training.messageId ? [[Markup.button.callback('🔄 Перезібрати список з чату', `${AdminCallbacks.TrainingReconcilePrefix}${training.id}`)]] : []),
         ...((training.status === 'open' || training.status === 'closed') ? [[
             Markup.button.callback('✏️ Змінити', `${AdminCallbacks.TrainingEditPrefix}${training.id}`),
             ...(registrationButton ? [registrationButton] : []),
@@ -66,6 +66,13 @@ export function createTrainingKeyboard(
                 AdminCallbacks.MainMenu,
             ),
         ],
+    ]);
+}
+
+export function createTrainingReconcileConfirmKeyboard(trainingId: string) {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback('✅ Перезібрати', `${AdminCallbacks.TrainingReconcileConfirmPrefix}${trainingId}`)],
+        [Markup.button.callback('❌ Скасувати', `${AdminCallbacks.TrainingPrefix}${trainingId}`)],
     ]);
 }
 
