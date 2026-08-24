@@ -4,6 +4,7 @@ import { ParticipantMutation, TrainingParticipantsService } from './training-par
 import { Training } from './training.types';
 import { validateReservedPlaces } from './reserved-places';
 import { RegistrationCommand } from './registration-command.parser';
+import { logger } from '../../utils/logger';
 
 type TelegramUserInput = { id: number; first_name?: string; username?: string };
 export type RegistrationActionInput = {
@@ -41,7 +42,10 @@ export class RegistrationService {
     async resolveCommand(input: ExecuteRegistrationCommandInput): Promise<RegistrationResolution> {
         if (input.replyToMessageId) {
             const replied = await this.trainings.findByMessageId(input.chatId, input.replyToMessageId);
-            if (replied && this.trainings.isRelevantOpen(replied, input.chatId)) return { kind: 'ready', training: replied };
+            if (replied && this.trainings.isRelevantOpen(replied, input.chatId)) {
+                if (this.rejectExplicitTimeMismatch(replied, input)) return { kind: 'none', reason: 'NO_APPLICABLE_TRAINING' };
+                return { kind: 'ready', training: replied };
+            }
             return { kind: 'none', reason: 'NO_APPLICABLE_TRAINING' };
         }
         let candidates = await this.trainings.listRelevantOpenByChatId(input.chatId);
@@ -49,11 +53,8 @@ export class RegistrationService {
         if (input.command.operation === 'remove') candidates = await this.filterRemovableCandidates(candidates, input);
         if (!candidates.length) return { kind: 'none', reason: input.command.operation === 'remove' ? 'NO_REMOVABLE_REGISTRATION' : 'NO_APPLICABLE_TRAINING' };
         const hint = input.command.trainingHint;
-        // A human-supplied time is a selector only when there is something to
-        // select between. Do not reject the sole real registration target for
-        // an approximate time (or relative-day wording). A concrete calendar
-        // date remains authoritative because it clearly addresses another day.
         if (candidates.length === 1 && !hasConflictingConcreteDate(candidates[0], hint)) {
+            if (this.rejectExplicitTimeMismatch(candidates[0], input)) return { kind: 'none', reason: 'NO_APPLICABLE_TRAINING' };
             return { kind: 'ready', training: candidates[0] };
         }
         if (hint) {
@@ -61,14 +62,7 @@ export class RegistrationService {
             const hinted = candidates.filter((training) => matchesTrainingHint(training, hint, timezone));
             if (hinted.length === 1) return { kind: 'ready', training: hinted[0] };
             if (hinted.length > 1) candidates = hinted;
-            else if (hint.time) {
-                const sameDate = candidates.filter((training) => matchesTrainingHint(training, { ...hint, time: undefined, endTime: undefined }, timezone));
-                const nearby = sameDate.filter((training) => Math.abs(toMinutes(training.startTime) - toMinutes(hint.time!)) <= 60)
-                    .sort((a, b) => Math.abs(toMinutes(a.startTime) - toMinutes(hint.time!)) - Math.abs(toMinutes(b.startTime) - toMinutes(hint.time!)));
-                if (nearby.length) return { kind: 'suspicious', trainings: nearby, suggestedTraining: nearby.length === 1 ? nearby[0] : undefined, reason: nearby.length === 1 ? 'TIME_NEAR_MATCH' : 'MULTIPLE_NEAR_MATCHES' };
-            }
-            // Explicit user constraints are never silently discarded. A nearby
-            // time is reviewed by admins above; a distant time/date is no match.
+            else if (hint.time) for (const training of candidates) this.rejectExplicitTimeMismatch(training, input);
             if (hint.time || hint.date || hint.naturalDate) {
                 return { kind: 'none', reason: 'NO_APPLICABLE_TRAINING' };
             }
@@ -84,6 +78,7 @@ export class RegistrationService {
     async executeCommandAgainstTraining(input: ExecuteRegistrationCommandInput, trainingId: string): Promise<ParticipantMutation[]> {
         const training = await this.trainings.getRequired(trainingId);
         if (!this.trainings.isRelevantOpen(training, input.chatId)) throw new Error('TRAINING_NO_LONGER_OPEN');
+        if (this.rejectExplicitTimeMismatch(training, input)) return [];
         const owner = input.telegramUser.id;
         const command = input.command;
         if (command.operation === 'add') {
@@ -127,6 +122,20 @@ export class RegistrationService {
             }
             throw error;
         }
+    }
+
+    private rejectExplicitTimeMismatch(training: Training, input: ExecuteRegistrationCommandInput): boolean {
+        const providedTime = input.command.hasExplicitTime ? input.command.trainingHint?.time : undefined;
+        if (!providedTime || normalizeClock(providedTime) === normalizeClock(training.startTime)) return false;
+        logger.info('registration.command_rejected', {
+            trainingId: training.id,
+            telegramUserId: input.telegramUser.id,
+            requestedPlaces: input.command.count,
+            providedTime,
+            trainingStartTime: training.startTime,
+            reason: 'explicit_time_mismatch',
+        });
+        return true;
     }
 
     private async filterRemovableCandidates(candidates: Training[], input: ExecuteRegistrationCommandInput): Promise<Training[]> {
@@ -189,7 +198,11 @@ export class RegistrationService {
     }
 }
 
-function toMinutes(value: string): number { const [hour, minute] = value.split(':').map(Number); return hour * 60 + minute; }
+function normalizeClock(value: string): string {
+    const match = value.match(/^(\d{1,2}):(\d{2})$/u);
+    if (!match) return value;
+    return `${String(Number(match[1])).padStart(2, '0')}:${match[2]}`;
+}
 
 function hasConflictingConcreteDate(training: Training, hint?: NonNullable<RegistrationCommand['trainingHint']>): boolean {
     if (!hint?.date) return false;

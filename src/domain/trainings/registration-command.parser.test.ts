@@ -93,7 +93,7 @@ test('critical messy command constrains the existing resolver to the unique club
     assert.deepEqual(command.targetNames, []);
 });
 
-test('one active training wins over a noisy explicit time without review', async () => {
+test('one active training rejects a conflicting explicit time', async () => {
     const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Kyiv', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
     const only = { id: 'only', clubId: 'club', chatId: -100, title: 'Only', date: today, startTime: '18:00', endTime: '20:00', placesLimit: 12, minPlayers: 1,
         status: 'open', participants: [], waitlist: [], createdAt: '', updatedAt: '' } as Training;
@@ -101,11 +101,10 @@ test('one active training wins over a noisy explicit time without review', async
         listRelevantOpenByChatId: async () => [only], isRelevantOpen: () => true,
     } as unknown as TrainingService, {} as TrainingParticipantsService, async () => 'Europe/Kyiv');
     const resolution = await service.resolveCommand({ telegramUser: { id: 7 }, chatId: -100, command: parser.parse('сегодня 17-30, +4  )))')! });
-    assert.equal(resolution.kind, 'ready');
-    assert.equal(resolution.kind === 'ready' && resolution.training.id, 'only');
+    assert.equal(resolution.kind, 'none');
 });
 
-test('two active trainings keep a half-hour hint ambiguous', async () => {
+test('two active trainings reject a time that matches neither start', async () => {
     const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Kyiv', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
     const make = (id: string, startTime: string) => ({ id, clubId: 'club', chatId: -100, title: id, date: today, startTime, endTime: '20:00', placesLimit: 12, minPlayers: 1,
         status: 'open', participants: [], waitlist: [], createdAt: '', updatedAt: '' }) as Training;
@@ -113,6 +112,9 @@ test('two active trainings keep a half-hour hint ambiguous', async () => {
         listRelevantOpenByChatId: async () => [make('early', '17:00'), make('late', '18:00')], isRelevantOpen: () => true,
     } as unknown as TrainingService, {} as TrainingParticipantsService, async () => 'Europe/Kyiv');
     const resolution = await service.resolveCommand({ telegramUser: { id: 7 }, chatId: -100, command: parser.parse('сьогодні 17:30 +1')! });
-    assert.equal(resolution.kind, 'suspicious');
-    assert.equal(resolution.kind === 'suspicious' && resolution.reason, 'MULTIPLE_NEAR_MATCHES');
+    assert.equal(resolution.kind, 'none');
+});
+
+test('clock-shaped but invalid explicit time fails safely', () => {
+    assert.throws(() => parser.parse('+4 25:00'), /Некоректно вказано час/u);
 });

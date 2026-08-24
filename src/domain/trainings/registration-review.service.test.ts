@@ -18,21 +18,18 @@ const parser = new RegistrationCommandParser();
 const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Kyiv', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 const training = (id: string, startTime: string): Training => ({ id, clubId: 'club', chatId: -100, messageId: 42, title: id, date: today(), startTime, endTime: '20:00', placesLimit: 20, minPlayers: 1, status: 'open', participants: [], waitlist: [], createdAt: '', publishedAt: '', updatedAt: '' });
 
-test('resolver prioritizes a sole target and reviews noisy time only when multiple targets exist', async () => {
+test('resolver accepts an exact time or no time and rejects every conflicting explicit time', async () => {
     let values = [training('evening', '18:00')];
     const trainings = { listRelevantOpenByChatId: async () => values } as unknown as TrainingService;
     const service = new RegistrationService({} as PlayerService, trainings, {} as TrainingParticipantsService, async () => 'Europe/Kyiv');
     const resolve = (text: string) => service.resolveCommand({ telegramUser: { id: 1 }, chatId: -100, command: parser.parse(text)! });
     assert.equal((await resolve('сегодня 18:00 +1')).kind, 'ready');
     assert.equal((await resolve('сегодня +1')).kind, 'ready');
-    const near = await resolve('сегодня 17-30, +4  )))');
-    assert.equal(near.kind, 'ready');
-    assert.equal(near.kind === 'ready' && near.training.id, 'evening');
-    assert.equal((await resolve('сегодня 16:00 +1')).kind, 'ready', 'a noisy time cannot eliminate the sole real target');
+    assert.equal((await resolve('сегодня 17-30, +4  )))')).kind, 'none');
+    assert.equal((await resolve('сегодня 16:00 +1')).kind, 'none');
     values = [training('early', '17:00'), training('late', '18:00')];
     const multiple = await resolve('сегодня 17:30 +1');
-    assert.equal(multiple.kind, 'suspicious');
-    assert.equal(multiple.kind === 'suspicious' && multiple.reason, 'MULTIPLE_NEAR_MATCHES');
+    assert.equal(multiple.kind, 'none');
 });
 
 test('one shared review goes only to admins, is idempotent by source, and synchronizes all messages', async () => {

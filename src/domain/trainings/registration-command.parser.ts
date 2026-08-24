@@ -65,6 +65,9 @@ export class RegistrationCommandParser {
         const relative = this.extractRelativeDate(extractedAction.remaining);
         const explicitDate = this.extractExplicitDate(relative.remaining);
         const time = this.extractTime(explicitDate.remaining, Boolean(relative.value || explicitDate.value));
+        if (!time.value && containsClockShapedToken(explicitDate.remaining)) {
+            throw new RegistrationCommandParseError('Некоректно вказано час тренування.');
+        }
         const targetText = this.extractPossibleTargetName(time.remaining);
         const targetNames = targetText
             ? targetText.split(',').map((name) => name.trim()).filter(Boolean)
@@ -198,6 +201,10 @@ function parseClock(hourToken: string, separateMinute?: string): string | undefi
     const minute = Number(separateMinute ?? parts[1] ?? 0);
     if (hour > 23 || minute > 59) return undefined;
     return `${pad(hour)}:${pad(minute)}`;
+}
+
+function containsClockShapedToken(value: string): boolean {
+    return /(?:^|[^\d])\d{1,2}[:.]\d{2}(?=$|[^\d])/u.test(value);
 }
 
 function parseDateToken(value: string): string | undefined {

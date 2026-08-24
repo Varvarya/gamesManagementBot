@@ -346,8 +346,8 @@ export class ApplicationContext {
         const result = await this.registrationReviews.resolve(review.id, { id: ctx.from.id, name: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ') }, decision, async (current, trainingId) => {
             const training = await runtime.context.services.trainings.getRequired(trainingId);
             if (!runtime.context.services.trainings.isRelevantOpen(training, current.sourceChatId)) throw new Error('TRAINING_NO_LONGER_OPEN');
-            await runtime.context.services.registration.executeCommandAgainstTraining({ telegramUser: current.telegramUser, chatId: current.sourceChatId, command: current.parsedCommand }, trainingId);
-            await runtime.publisher.refreshMessage(trainingId);
+            const mutations = await runtime.context.services.registration.executeCommandAgainstTraining({ telegramUser: current.telegramUser, chatId: current.sourceChatId, command: current.parsedCommand }, trainingId);
+            if (mutations.length) await runtime.publisher.refreshMessage(trainingId);
         });
         await ctx.answerCbQuery(result === 'resolved' ? 'Збережено.' : result === 'expired' ? 'Запит прострочено.' : 'Цей запит уже вирішено.', { show_alert: result !== 'resolved' });
     }

@@ -98,13 +98,17 @@ export class RegistrationRecoveryService {
                     const existingReview = await this.reviews?.findBySource(this.clubId, current.chatId, message.messageId);
                     if (existingReview) {
                         if (existingReview.status === 'resolved' && existingReview.resolution === 'accepted' && existingReview.resolvedTrainingId === current.id) {
-                            await registration.executeCommandAgainstTraining(input, current.id); commandsApplied++;
+                            const mutations = await registration.executeCommandAgainstTraining(input, current.id);
+                            if (mutations.length) commandsApplied++;
                         } else if (existingReview.status === 'pending') pendingReviews++;
                         continue;
                     }
                     const resolution = await registration.resolveCommand(input);
                     if (resolution.kind === 'ready') {
-                        if (resolution.training.id === current.id) { await registration.executeCommandAgainstTraining(input, current.id); commandsApplied++; }
+                        if (resolution.training.id === current.id) {
+                            const mutations = await registration.executeCommandAgainstTraining(input, current.id);
+                            if (mutations.length) commandsApplied++;
+                        }
                         continue;
                     }
                     if (resolution.kind === 'suspicious') {
