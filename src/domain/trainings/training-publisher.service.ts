@@ -6,6 +6,7 @@ import { TrainingService } from './training.service';
 import { Training } from './training.types';
 import { logger } from '../../utils/logger';
 import { isTelegramMessageNotModified, isTelegramMessageUnavailable } from '../../utils/telegramEditErrors';
+import { PublicationTrace, publicationTraceFields } from './publication-trace';
 
 type PublishManualTrainingInput = {
     clubId: string;
@@ -41,6 +42,7 @@ export type PublishTemplateSlotInput = {
     placesLimit: number;
     minPlayers: number;
     cancelCheckHoursBefore?: number;
+    trace?: PublicationTrace;
 };
 
 export class TrainingPublisherService {
@@ -61,25 +63,31 @@ export class TrainingPublisherService {
 
     async publishManual(
         input: PublishManualTrainingInput,
+        trace: PublicationTrace = { triggerSource: 'manual_admin' },
     ): Promise<Training> {
         const training = await this.trainings.createDraft(input);
+        logger.info('scheduler.training_resolved', { ...publicationTraceFields(trace), clubId: training.clubId, trainingId: training.id, result: 'created', date: training.date });
 
-        return this.publishDraft(training);
+        return this.publishDraft(training, trace);
     }
 
-    async publishExistingDraft(trainingId: string): Promise<Training> {
+    async publishExistingDraft(trainingId: string, trace?: PublicationTrace): Promise<Training> {
         const current = this.draftPublications.get(trainingId);
         if (current) return current;
-        const publication = this.publishExistingDraftOnce(trainingId);
+        const publication = this.publishExistingDraftOnce(trainingId, trace);
         this.draftPublications.set(trainingId, publication);
         try { return await publication; }
         finally { if (this.draftPublications.get(trainingId) === publication) this.draftPublications.delete(trainingId); }
     }
 
-    private async publishExistingDraftOnce(trainingId: string): Promise<Training> {
+    private async publishExistingDraftOnce(trainingId: string, trace?: PublicationTrace): Promise<Training> {
         const training = await this.trainings.getRequired(trainingId);
-        if (training.status !== 'draft') return training;
-        return this.publishDraft(training);
+        logger.info('scheduler.training_resolved', { ...publicationTraceFields(trace), clubId: training.clubId, trainingId: training.id, result: 'existing', templateId: training.templateId, slotId: training.templateSlotId, date: training.date, status: training.status });
+        if (training.status !== 'draft') {
+            logger.info('scheduler.job_skipped', { ...publicationTraceFields(trace), clubId: training.clubId, trainingId: training.id, reason: 'already_published' });
+            return training;
+        }
+        return this.publishDraft(training, trace);
     }
 
     async republish(trainingId: string): Promise<Training> {
@@ -163,6 +171,7 @@ export class TrainingPublisherService {
 
     private async publishDraft(
         training: Training,
+        trace?: PublicationTrace,
     ): Promise<Training> {
         if (training.messageId) {
             throw new Error(
@@ -170,21 +179,26 @@ export class TrainingPublisherService {
             );
         }
 
-        const text = await this.render({
-            ...training,
-            status: 'open',
-        });
+        let text: string;
+        try {
+            logger.info('training_publication.render_started', { ...publicationTraceFields(trace), clubId: training.clubId, trainingId: training.id, templateId: training.templateId, slotId: training.templateSlotId });
+            text = await this.render({ ...training, status: 'open' });
+            logger.info('training_publication.render_succeeded', { ...publicationTraceFields(trace), clubId: training.clubId, trainingId: training.id, templateId: training.templateId, slotId: training.templateSlotId });
+        } catch (error) {
+            logger.error('training_publication.render_failed', { ...publicationTraceFields(trace), clubId: training.clubId, trainingId: training.id, templateId: training.templateId, slotId: training.templateSlotId, error });
+            throw error;
+        }
 
         let message: Awaited<ReturnType<Telegram['sendMessage']>>;
 
         try {
-            logger.info('training_publication.telegram_send_started', { clubId: training.clubId, trainingId: training.id, templateId: training.templateId, chatId: training.chatId });
+            logger.info('training_publication.telegram_send_started', { ...publicationTraceFields(trace), clubId: training.clubId, trainingId: training.id, templateId: training.templateId, slotId: training.templateSlotId, chatId: training.chatId });
             message = await this.telegram.sendMessage(
                 training.chatId,
                 text,
             );
         } catch (error) {
-            logger.error('training_publication.telegram_send_failed', { clubId: training.clubId, trainingId: training.id, templateId: training.templateId, chatId: training.chatId, error });
+            logger.error('training_publication.telegram_send_failed', { ...publicationTraceFields(trace), clubId: training.clubId, trainingId: training.id, templateId: training.templateId, slotId: training.templateSlotId, chatId: training.chatId, error });
             logger.error('publication.send_failed', { trainingId: training.id, chatId: training.chatId, error });
             throw new Error(
                 `Failed to publish training ${training.id} to chat ${training.chatId}`,
@@ -200,6 +214,7 @@ export class TrainingPublisherService {
                 messageId: message.message_id,
             });
         } catch (error) {
+            logger.error('training_publication.persistence_failed', { ...publicationTraceFields(trace), clubId: training.clubId, trainingId: training.id, templateId: training.templateId, slotId: training.templateSlotId, chatId: training.chatId, messageId: message.message_id, error });
             try {
                 await this.telegram.deleteMessage(
                     training.chatId,
@@ -216,8 +231,9 @@ export class TrainingPublisherService {
         }
 
         this.renderedMessages.set(published.id, text);
-        logger.info('training_publication.telegram_send_succeeded', { clubId: published.clubId, trainingId: published.id, templateId: published.templateId, chatId: published.chatId, messageId: published.messageId });
-        logger.info('training_publication.completed', { clubId: published.clubId, trainingId: published.id, templateId: published.templateId, chatId: published.chatId, messageId: published.messageId });
+        logger.info('training_publication.persistence_succeeded', { ...publicationTraceFields(trace), clubId: published.clubId, trainingId: published.id, templateId: published.templateId, slotId: published.templateSlotId, chatId: published.chatId, messageId: published.messageId });
+        logger.info('training_publication.telegram_send_succeeded', { ...publicationTraceFields(trace), clubId: published.clubId, trainingId: published.id, templateId: published.templateId, slotId: published.templateSlotId, chatId: published.chatId, messageId: published.messageId });
+        logger.info('training_publication.completed', { ...publicationTraceFields(trace), clubId: published.clubId, trainingId: published.id, templateId: published.templateId, slotId: published.templateSlotId, chatId: published.chatId, messageId: published.messageId });
         logger.info('publication.published', { trainingId: published.id, chatId: published.chatId, messageId: published.messageId, templateId: published.templateId, slotId: published.templateSlotId });
 
         if (this.onPublished) {
@@ -338,10 +354,11 @@ export class TrainingPublisherService {
          */
         if (existing) {
             if (existing.status === 'draft' && !existing.messageId) {
-                logger.info('scheduler.training_reused', { trainingId: existing.id, templateId: input.templateId, slotId: input.slotId, date: input.date, status: existing.status });
-                return this.publishDraft(existing);
+                logger.info('scheduler.training_resolved', { ...publicationTraceFields(input.trace), trainingId: existing.id, clubId: existing.clubId, result: 'existing', templateId: input.templateId, slotId: input.slotId, date: input.date, status: existing.status });
+                return this.publishDraft(existing, input.trace);
             }
-            logger.info('publication.duplicate_skipped', { trainingId: existing.id, templateId: input.templateId, slotId: input.slotId, date: input.date });
+            logger.info('scheduler.training_resolved', { ...publicationTraceFields(input.trace), trainingId: existing.id, clubId: existing.clubId, result: 'existing', templateId: input.templateId, slotId: input.slotId, date: input.date, status: existing.status });
+            logger.info('scheduler.job_skipped', { ...publicationTraceFields(input.trace), clubId: existing.clubId, trainingId: existing.id, templateId: input.templateId, slotId: input.slotId, date: input.date, reason: 'already_published' });
             return existing;
         }
 
@@ -382,10 +399,11 @@ export class TrainingPublisherService {
                 cancelCheckHoursBefore: input.cancelCheckHoursBefore,
             });
 
-        logger.info('scheduler.training_created', { trainingId: training.id, clubId: input.clubId, templateId: input.templateId, slotId: input.slotId, date: input.date });
+        logger.info('scheduler.training_resolved', { ...publicationTraceFields(input.trace), trainingId: training.id, clubId: input.clubId, result: 'created', templateId: input.templateId, slotId: input.slotId, date: input.date });
 
         return this.publishDraft(
             training,
+            input.trace,
         );
     }
 }

@@ -17,6 +17,8 @@ yarn-error.log*
 .vscode/*
 *.test.ts
 !src/scheduler/scheduler.service.test.ts
+!src/domain/templates/template-scheduler.service.test.ts
+!src/e2e/club-open-contract.test.ts
 !src/production-readiness.test.ts
 !src/domain/telegram-import/telegram-auth-error.test.ts
 !src/domain/telegram-import/telegram-qr-auth.test.ts

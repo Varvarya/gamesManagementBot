@@ -8,6 +8,24 @@ import { TrainingPublisherService } from './training-publisher.service';
 import { TrainingService } from './training.service';
 import { Training } from './training.types';
 
+test('manual publication is explicitly logged as manual_admin', async () => {
+    const records: Array<Record<string, unknown>> = [];
+    const originalInfo = console.info;
+    console.info = (line?: unknown) => { if (typeof line === 'string') records.push(JSON.parse(line)); };
+    try {
+        let training = { id: 'manual-training', clubId: 'club', chatId: -200, title: 'Manual', date: '2026-08-24', startTime: '18:00', endTime: '20:00', placesLimit: 8, minPlayers: 2, status: 'draft', participants: [], waitlist: [], createdAt: '', updatedAt: '' } as Training;
+        const publisher = new TrainingPublisherService(
+            { sendMessage: async () => ({ message_id: 77 }) } as unknown as Telegram,
+            { players: { list: async () => [] } } as unknown as RepositoriesContext,
+            { createDraft: async () => training, publish: async ({ messageId }: { messageId: number }) => (training = { ...training, status: 'open', messageId }) } as unknown as TrainingService,
+            { render: () => 'manual' } as unknown as TrainingMessageRenderer,
+        );
+        await publisher.publishManual({ clubId: 'club', chatId: -200, title: 'Manual', date: '2026-08-24', startTime: '18:00', endTime: '20:00', placesLimit: 8, minPlayers: 2 });
+    } finally { console.info = originalInfo; }
+    const sent = records.find((record) => record.event === 'training_publication.telegram_send_started');
+    assert.equal(sent?.triggerSource, 'manual_admin');
+});
+
 test('concurrent template publication is deduplicated', async () => {
     let stored: Training | undefined;
     let sends = 0;

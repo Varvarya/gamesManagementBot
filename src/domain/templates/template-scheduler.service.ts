@@ -12,6 +12,7 @@ import { logger } from '../../utils/logger';
 import { ScheduleExceptionService } from '../schedule-exceptions/schedule-exception.service';
 import { ScheduleOccurrenceResolver } from '../schedule-exceptions/schedule-occurrence.resolver';
 import { EffectiveOccurrence, ScheduleException } from '../schedule-exceptions/schedule-exception.types';
+import { PublicationTrace, publicationTraceFields } from '../trainings/publication-trace';
 
 type CreateTemplateInput =
     Parameters<TemplateService['create']>[0];
@@ -22,6 +23,7 @@ type ZonedNow = {
     date: string;
     time: string;
 };
+type SchedulerSyncStats = { overdueOccurrencesFound: number; overdueOccurrencesRecovered: number; occurrencesSkipped: number };
 
 export class TemplateSchedulerService {
     constructor(
@@ -73,31 +75,41 @@ export class TemplateSchedulerService {
 
     async restore(templates: TrainingTemplate[], options: { reconcileMissed?: boolean } = {}): Promise<number> {
         const clubId = templates[0]?.clubId ?? (await this.settings.get()).clubId;
+        const slotsScanned = templates.reduce((total, template) => total + template.slots.length, 0);
+        logger.info('scheduler.restore_started', { clubId, templatesScanned: templates.length, slotsScanned, reconcileMissed: options.reconcileMissed ?? false });
         this.scheduler.cancelByPrefix(`club:${clubId}:template:`);
         this.scheduler.cancelByPrefix(`club:${clubId}:exception:`);
 
+        const stats: SchedulerSyncStats = { overdueOccurrencesFound: 0, overdueOccurrencesRecovered: 0, occurrencesSkipped: 0 };
         for (const template of templates) {
-            await this.syncTemplate(template, options.reconcileMissed ?? false);
+            const current = await this.syncTemplate(template, options.reconcileMissed ?? false);
+            stats.overdueOccurrencesFound += current.overdueOccurrencesFound;
+            stats.overdueOccurrencesRecovered += current.overdueOccurrencesRecovered;
+            stats.occurrencesSkipped += current.occurrencesSkipped;
         }
         await this.syncExceptionJobs(templates);
 
         const snapshot = this.scheduler.getJobsSnapshot();
         logger.info('scheduler.jobs_snapshot', { clubId: templates[0]?.clubId ?? (await this.settings.get()).clubId, jobs: snapshot });
 
-        return this.scheduler.getScheduledTemplateIds()
+        const futureJobsRegistered = this.scheduler.getScheduledTemplateIds()
             .filter(id => id.startsWith('club:') && id.includes(':template:'))
             .length;
+        logger.info('scheduler.restore_completed', { clubId, templatesScanned: templates.length, slotsScanned, futureJobsRegistered, activeJobs: snapshot.length, ...stats });
+        return futureJobsRegistered;
     }
 
     async syncTemplate(
         template: TrainingTemplate,
         publishMissed = false,
-    ): Promise<void> {
+    ): Promise<SchedulerSyncStats> {
+        const stats: SchedulerSyncStats = { overdueOccurrencesFound: 0, overdueOccurrencesRecovered: 0, occurrencesSkipped: 0 };
         this.cancelTemplateJobs(template.clubId, template.id);
 
         if (!template.enabled) {
             logger.info('training_publication.skipped', { clubId: template.clubId, templateId: template.id, reason: 'TEMPLATE_PAUSED' });
-            return;
+            stats.occurrencesSkipped = template.slots.length;
+            return stats;
         }
         if (!template.slots.length) {
             throw new Error(`Template ${template.id} has no slots`);
@@ -108,22 +120,25 @@ export class TemplateSchedulerService {
         for (const slot of template.slots) {
             if (!slot.enabled) {
                 logger.info('training_publication.skipped', { clubId: template.clubId, templateId: template.id, slotId: slot.id, reason: 'SLOT_DISABLED' });
+                stats.occurrencesSkipped += 1;
                 continue;
             }
             this.scheduleSlot(template, slot, timezone);
 
             if (publishMissed) {
                 try {
-                    await this.publishMissedIfRelevant(
+                    const recovered = await this.publishMissedIfRelevant(
                         template,
                         slot,
                         timezone,
                     );
+                    if (recovered) { stats.overdueOccurrencesFound += 1; stats.overdueOccurrencesRecovered += 1; }
                 } catch (error) {
                     logger.error('scheduler.missed_publication_failed', { jobId: this.getSlotJobId(template.clubId, template.id, slot.id), clubId: template.clubId, templateId: template.id, slotId: slot.id, error });
                 }
             }
         }
+        return stats;
     }
 
     private scheduleSlot(
@@ -168,10 +183,15 @@ export class TemplateSchedulerService {
                 clubId: template.clubId,
                 templateId: template.id,
                 slotId: slot.id,
+                trainingDate: nextTrainingDate,
+                trainingStartAt: `${nextTrainingDate}T${resolved.startTime}`,
+                scheduledFor: `${publicationDate}T${resolved.publishTime}`,
+                currentTime: `${zonedNow.date}T${zonedNow.time}`,
+                triggerSource: 'cron',
             },
             async () => {
+                const trace: PublicationTrace = { jobId, publicationAttemptId: jobId, triggerSource: 'cron' };
                 try {
-                    logger.info('scheduler.template_job_started', { jobId, clubId: template.clubId, templateId: template.id, slotId: slot.id, scheduledFor: resolved.publishTime, timezone, startedAt: this.now().toISOString() });
                     const currentTemplate =
                         await this.templates.getRequired(template.id);
                     const currentSlot = currentTemplate.slots.find(
@@ -179,7 +199,7 @@ export class TemplateSchedulerService {
                     );
 
                     if (!currentTemplate.enabled || !currentSlot?.enabled) {
-                        logger.info('training_publication.skipped', { jobId, clubId: currentTemplate.clubId, templateId: currentTemplate.id, slotId: slot.id, reason: !currentTemplate.enabled ? 'TEMPLATE_PAUSED' : 'SLOT_DISABLED' });
+                        logger.info('scheduler.job_skipped', { ...publicationTraceFields(trace), clubId: currentTemplate.clubId, templateId: currentTemplate.id, slotId: slot.id, reason: !currentTemplate.enabled ? 'template_disabled' : 'slot_disabled' });
                         this.scheduler.cancelTemplate(jobId);
                         return;
                     }
@@ -193,10 +213,8 @@ export class TemplateSchedulerService {
                     );
                     const currentPublicationDate = addCalendarDays(trainingDate, -currentResolved.publishDaysBefore);
 
-                    logger.info('scheduler.job_occurrence_resolved', { clubId: currentTemplate.clubId, templateId: currentTemplate.id, slotId: currentSlot.id, trainingDate, startTime: currentResolved.startTime, publishAt: `${currentPublicationDate}T${currentResolved.publishTime}`, timezone });
-                    logger.info('scheduler.publication_started', { jobId, clubId: currentTemplate.clubId, templateId: currentTemplate.id, slotId: currentSlot.id, trainingDate });
-                    await this.publishSlot(currentTemplate, currentSlot, trainingDate);
-                    logger.info('scheduler.publication_completed', { jobId, clubId: currentTemplate.clubId, templateId: currentTemplate.id, slotId: currentSlot.id, trainingDate });
+                    logger.info('scheduler.job_occurrence_resolved', { ...publicationTraceFields(trace), clubId: currentTemplate.clubId, templateId: currentTemplate.id, slotId: currentSlot.id, trainingDate, startTime: currentResolved.startTime, publishAt: `${currentPublicationDate}T${currentResolved.publishTime}`, timezone });
+                    await this.publishSlot(currentTemplate, currentSlot, trainingDate, trace);
                 } catch (error) {
                     logger.error('scheduler.automatic_publication_failed', { jobId, clubId: template.clubId, templateId: template.id, slotId: slot.id, stage: 'occurrence_or_publication', error });
                     throw error;
@@ -226,7 +244,7 @@ export class TemplateSchedulerService {
         template: TrainingTemplate,
         slot: TrainingTemplateSlot,
         timezone: string,
-    ): Promise<void> {
+    ): Promise<boolean> {
         const resolved = resolveTemplateSlot(template, slot);
         const zonedNow = getZonedNow(this.now(), timezone);
         const trainingDate = findNearestFutureTrainingDate(
@@ -248,46 +266,50 @@ export class TemplateSchedulerService {
         ) {
             const jobId = this.getSlotJobId(template.clubId, template.id, slot.id);
             logger.warn('training_publication.overdue_detected', { clubId: template.clubId, templateId: template.id, slotId: slot.id, chatId: template.chatId, trainingStartsAt: `${trainingDate}T${resolved.startTime}`, openAt: `${publicationDate}T${resolved.publishTime}`, timezone, jobId });
-            await this.publishSlot(template, slot, trainingDate);
+            await this.publishSlot(template, slot, trainingDate, { jobId, publicationAttemptId: jobId, triggerSource: 'startup_recovery' });
             logger.info('training_publication.recovered', { clubId: template.clubId, templateId: template.id, slotId: slot.id, chatId: template.chatId, trainingStartsAt: `${trainingDate}T${resolved.startTime}`, openAt: `${publicationDate}T${resolved.publishTime}`, timezone, jobId });
+            return true;
         }
+        return false;
     }
 
     private async publishSlot(
         template: TrainingTemplate,
         slot: TrainingTemplateSlot,
         trainingDate: string,
+        trace: PublicationTrace,
     ): Promise<void> {
         const exception = await this.exceptions?.findForOccurrence(slot.id, trainingDate);
         const occurrence = this.occurrenceResolver.resolveRecurring(template, slot, trainingDate, exception);
         if (!occurrence?.publicationEnabled) {
-            logger.info('training_publication.skipped', { clubId: template.clubId, templateId: template.id, slotId: slot.id, date: trainingDate, reason: exception?.type === 'cancel' ? 'TRAINING_CANCELLED' : 'OCCURRENCE_NOT_FOUND' });
+            logger.info('scheduler.job_skipped', { ...publicationTraceFields(trace), clubId: template.clubId, templateId: template.id, slotId: slot.id, date: trainingDate, reason: exception?.type === 'cancel' ? 'occurrence_cancelled' : 'occurrence_not_found' });
             return;
         }
         // A changed publication time is handled by its one-off job, not by the recurring job.
         const resolved = resolveTemplateSlot(template, slot);
         if (exception?.type === 'override' && occurrence.publishTime !== resolved.publishTime) {
-            logger.info('training_publication.skipped', { clubId: template.clubId, templateId: template.id, slotId: slot.id, date: trainingDate, reason: 'OPEN_AT_OVERRIDDEN' });
+            logger.info('scheduler.job_skipped', { ...publicationTraceFields(trace), clubId: template.clubId, templateId: template.id, slotId: slot.id, date: trainingDate, reason: 'stale_occurrence' });
             return;
         }
-        await this.publishOccurrence(occurrence);
+        await this.publishOccurrence(occurrence, trace);
     }
 
-    private async publishOccurrence(occurrence: EffectiveOccurrence): Promise<void> {
+    private async publishOccurrence(occurrence: EffectiveOccurrence, trace: PublicationTrace): Promise<void> {
         const chat = await this.chats.getById(occurrence.chatId);
         if (!chat?.enabled) {
-            logger.error('training_publication.chat_not_found', { clubId: occurrence.clubId, templateId: occurrence.scheduleId, slotId: occurrence.scheduleEntryId, chatId: occurrence.chatId, trainingStartsAt: `${occurrence.date}T${occurrence.startTime}` });
+            logger.error('training_publication.chat_resolution_failed', { ...publicationTraceFields(trace), clubId: occurrence.clubId, templateId: occurrence.scheduleId, slotId: occurrence.scheduleEntryId, configuredChatId: occurrence.chatId, resolutionSource: occurrence.exceptionId ? 'schedule_exception' : 'template', trainingStartsAt: `${occurrence.date}T${occurrence.startTime}`, reason: 'missing_or_disabled' });
             throw new Error(`Schedule publication chat ${occurrence.chatId} is missing or disabled`);
         }
-        logger.info('training_publication.telegram_send_started', { clubId: occurrence.clubId, templateId: occurrence.scheduleId, slotId: occurrence.scheduleEntryId, date: occurrence.date, chatId: occurrence.chatId });
+        logger.info('training_publication.chat_resolved', { ...publicationTraceFields(trace), clubId: occurrence.clubId, templateId: occurrence.scheduleId, slotId: occurrence.scheduleEntryId, configuredChatId: occurrence.chatId, resolvedChatId: chat.id, chatTitle: chat.name, resolutionSource: occurrence.exceptionId ? 'schedule_exception' : 'template' });
         const training = await this.publisher.publishTemplateSlot({
             templateId: occurrence.scheduleId ?? `exception:${occurrence.exceptionId}`,
             slotId: occurrence.scheduleEntryId ?? 'extra', clubId: occurrence.clubId, chatId: occurrence.chatId,
             title: occurrence.title, location: occurrence.location, date: occurrence.date, startTime: occurrence.startTime,
             endTime: occurrence.endTime, placesLimit: occurrence.placesLimit, minPlayers: occurrence.minPlayers,
             cancelCheckHoursBefore: occurrence.cancelCheckHoursBefore,
+            trace,
         });
-        logger.info('training_publication.completed', { clubId: occurrence.clubId, trainingId: training.id, templateId: occurrence.scheduleId, slotId: occurrence.scheduleEntryId, date: occurrence.date, chatId: occurrence.chatId, messageId: training.messageId, reused: training.status !== 'draft' });
+        logger.info('training_publication.attempt_completed', { ...publicationTraceFields(trace), clubId: occurrence.clubId, trainingId: training.id, templateId: occurrence.scheduleId, slotId: occurrence.scheduleEntryId, date: occurrence.date, chatId: occurrence.chatId, messageId: training.messageId });
     }
 
     async syncExceptionJobs(currentTemplates?: TrainingTemplate[]): Promise<void> {
@@ -314,17 +336,19 @@ export class TemplateSchedulerService {
                 || (occurrence.date === zonedNow.date && occurrence.startTime > zonedNow.time);
             if (publicationAlreadyDue && trainingStillFuture) {
                 try {
-                    await this.publishOccurrence(occurrence);
+                    await this.publishOccurrence(occurrence, { jobId, publicationAttemptId: jobId, triggerSource: 'startup_recovery' });
                 } catch (error) {
                     logger.error('scheduler.missed_publication_failed', { jobId, clubId: occurrence.clubId, templateId: occurrence.scheduleId, slotId: occurrence.scheduleEntryId, stage: 'exception_recovery', error });
                 }
                 continue;
             }
-            this.scheduler.rescheduleOneOff({ id: jobId, date: publicationDate, time: occurrence.publishTime, timezone }, async () => {
-                const latest = await this.exceptions!.findById(exception.id); if (!latest) return;
+            this.scheduler.rescheduleOneOff({ id: jobId, date: publicationDate, time: occurrence.publishTime, timezone, clubId: occurrence.clubId, templateId: occurrence.scheduleId, slotId: occurrence.scheduleEntryId, trainingDate: occurrence.date, trainingStartAt: `${occurrence.date}T${occurrence.startTime}`, triggerSource: 'cron' }, async () => {
+                const trace: PublicationTrace = { jobId, publicationAttemptId: jobId, triggerSource: 'cron' };
+                const latest = await this.exceptions!.findById(exception.id); if (!latest) { logger.info('scheduler.job_skipped', { ...publicationTraceFields(trace), clubId: occurrence.clubId, templateId: occurrence.scheduleId, slotId: occurrence.scheduleEntryId, reason: 'occurrence_not_found' }); return; }
                 const current = latest.type === 'extra' ? this.occurrenceResolver.resolveExtra(latest) : latest.scheduleEntryId && byEntry.get(latest.scheduleEntryId)
                     ? this.occurrenceResolver.resolveRecurring(byEntry.get(latest.scheduleEntryId)!.template, byEntry.get(latest.scheduleEntryId)!.slot, latest.date, latest) : undefined;
-                if (current) await this.publishOccurrence(current);
+                if (current) await this.publishOccurrence(current, trace);
+                else logger.info('scheduler.job_skipped', { ...publicationTraceFields(trace), clubId: occurrence.clubId, templateId: occurrence.scheduleId, slotId: occurrence.scheduleEntryId, reason: 'occurrence_not_found' });
             });
         }
     }
@@ -342,7 +366,8 @@ export class TemplateSchedulerService {
             if (template && slot) occurrence = this.occurrenceResolver.resolveRecurring(template, slot, exception.date, { ...exception, publicationEnabled: true });
         }
         if (!occurrence || exception.type === 'cancel') throw new Error('Цю дату не можна опублікувати.');
-        await this.publishOccurrence(occurrence);
+        const jobId = this.getExceptionJobId(exception);
+        await this.publishOccurrence(occurrence, { jobId, publicationAttemptId: jobId, triggerSource: 'manual_admin' });
     }
 
     private getExceptionJobId(exception: ScheduleException): string { return `club:${exception.clubId}:exception:${exception.id}`; }

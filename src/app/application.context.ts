@@ -313,10 +313,9 @@ export class ApplicationContext {
             try {
                 const runtime = await this.getClubRuntime(club.id);
                 const templates = await runtime.context.repositories.templates.listEnabled();
-                const restoredJobCount = await runtime.templateScheduler.restore(templates, { reconcileMissed: true });
-                const restoredOneOffCount = await runtime.scheduledTrainingPublications.restore();
+                const restoredJobCount = runtime.context.services.scheduler.getScheduledTemplateIds().filter((id) => id.includes(':template:')).length;
+                const restoredOneOffCount = runtime.context.services.scheduler.getScheduledTemplateIds().filter((id) => id.includes(':training:')).length;
                 totalRestoredJobCount += restoredJobCount;
-                await runtime.cancellationScheduler.restore({ reconcileOverdue: false });
                 const expectedJobCount = templates.reduce((count, template) => count + template.slots.filter((slot) => slot.enabled).length, 0);
                 await this.clubs.recordSchedulerRestore(club.id, expectedJobCount, restoredJobCount);
                 logger.info('scheduler.club_restore_completed', { clubId: club.id, jobCount: restoredJobCount, oneOffJobCount: restoredOneOffCount });
@@ -374,7 +373,11 @@ export class ApplicationContext {
                 // Continue with one fresh load. No other club runtime is ever used.
             }
         }
-        const loading = this.clubContexts.getClubContext(clubId).then((context) => this.createClubRuntime(context));
+        const loading = this.clubContexts.getClubContext(clubId).then(async (context) => {
+            const runtime = this.createClubRuntime(context);
+            await this.initializeClubRuntime(runtime, 'runtime_created');
+            return runtime;
+        });
         this.clubRuntimes.set(clubId, loading);
         try { return await loading; }
         catch (error) {
@@ -384,12 +387,23 @@ export class ApplicationContext {
     }
 
     private invalidateClubRuntime(clubId: string): void {
+        logger.info('club.runtime_invalidated', { clubId, reason: 'explicit_invalidation' });
         void this.clubRuntimes.get(clubId)?.then((runtime) => {
             runtime.context.services.scheduler.cancelAll();
             runtime.cancellationScheduler.cancelAll();
         }).catch(() => undefined);
         this.clubRuntimes.delete(clubId);
         this.clubContexts.invalidateClubContext(clubId);
+    }
+
+    private async initializeClubRuntime(runtime: ClubHandlerRuntime, reason: 'runtime_created'): Promise<void> {
+        const { clubId } = runtime.context;
+        logger.info('club.runtime_scheduler_initialization_started', { clubId, reason });
+        const templates = await runtime.context.repositories.templates.listEnabled();
+        const templateJobCount = await runtime.templateScheduler.restore(templates, { reconcileMissed: true });
+        const oneOffJobCount = await runtime.scheduledTrainingPublications.restore();
+        await runtime.cancellationScheduler.restore({ reconcileOverdue: false });
+        logger.info('club.runtime_scheduler_initialization_completed', { clubId, reason, templateCount: templates.length, templateJobCount, oneOffJobCount, jobs: runtime.context.services.scheduler.getJobsSnapshot() });
     }
 
     private createClubRuntime(context: ClubRuntimeContext): ClubHandlerRuntime {

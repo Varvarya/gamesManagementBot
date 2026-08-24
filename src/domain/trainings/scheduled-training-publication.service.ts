@@ -5,6 +5,7 @@ import { getZonedNow } from '../templates/template-scheduler.service';
 import { TrainingPublisherService } from './training-publisher.service';
 import { TrainingService } from './training.service';
 import { Training } from './training.types';
+import { PublicationTrace, publicationTraceFields } from './publication-trace';
 
 type SettingsSource = { get(): Promise<{ timezone: string }> };
 type TrainingSource = { list(): Promise<Training[]> };
@@ -51,39 +52,40 @@ export class ScheduledTrainingPublicationService {
         const nowLocal = `${zonedNow.date}T${zonedNow.time}`;
         if (openAt <= nowLocal) {
             logger.warn('training_publication.overdue_detected', this.fields(training, settings.timezone, jobId));
-            const published = await this.publishIfEligible(training.id, jobId, 'overdue_recovery');
+            const published = await this.publishIfEligible(training.id, jobId, 'startup_recovery');
             if (published) logger.info('training_publication.recovered', this.fields(published, settings.timezone, jobId));
             return published ? 'published' : 'skipped';
         }
-        this.scheduler.rescheduleOneOff({ id: jobId, date: openAt.slice(0, 10), time: openAt.slice(11, 16), timezone: settings.timezone }, async () => {
-            logger.info('training_publication.job_started', this.fields(await this.trainings.getRequired(training.id), settings.timezone, jobId));
-            await this.publishIfEligible(training.id, jobId, 'scheduled_job');
+        this.scheduler.rescheduleOneOff({ id: jobId, date: openAt.slice(0, 10), time: openAt.slice(11, 16), timezone: settings.timezone, clubId: training.clubId, templateId: training.templateId, slotId: training.templateSlotId, trainingDate: training.date, trainingStartAt: `${training.date}T${training.startTime}`, triggerSource: 'cron' }, async () => {
+            await this.publishIfEligible(training.id, jobId, 'cron');
         });
         logger.info('training_publication.scheduled', { ...this.fields(training, settings.timezone, jobId), registeredAt: this.now().toISOString(), restored: restoring });
         return 'scheduled';
     }
 
-    private async publishIfEligible(trainingId: string, jobId: string, source: string): Promise<Training | undefined> {
+    private async publishIfEligible(trainingId: string, jobId: string, triggerSource: PublicationTrace['triggerSource']): Promise<Training | undefined> {
+        const trace: PublicationTrace = { jobId, publicationAttemptId: jobId, triggerSource };
         const current = await this.trainings.getRequired(trainingId);
         if (current.status !== 'draft' || current.messageId || !current.scheduledPublicationAt) {
-            logger.info('training_publication.skipped', { clubId: current.clubId, trainingId, jobId, source, reason: 'already_published_or_not_scheduled' });
+            logger.info('scheduler.job_skipped', { ...publicationTraceFields(trace), clubId: current.clubId, trainingId, reason: current.messageId || current.status !== 'draft' ? 'already_published' : 'publication_not_due' });
             return undefined;
         }
         const { timezone } = await this.settings.get();
         const now = getZonedNow(this.now(), timezone);
         if (`${current.date}T${current.startTime}` <= `${now.date}T${now.time}`) {
-            logger.info('training_publication.skipped', { ...this.fields(current, timezone, jobId), source, reason: 'training_started_or_finished' });
+            logger.info('scheduler.job_skipped', { ...this.fields(current, timezone, jobId), ...publicationTraceFields(trace), reason: 'stale_occurrence' });
             return undefined;
         }
         const chat = await this.chats.getById(current.chatId);
         if (!chat?.enabled) {
-            logger.error('training_publication.chat_not_found', { ...this.fields(current, timezone, jobId), source });
+            logger.error('training_publication.chat_resolution_failed', { ...this.fields(current, timezone, jobId), ...publicationTraceFields(trace), configuredChatId: current.chatId, resolutionSource: 'training', reason: 'missing_or_disabled' });
             return undefined;
         }
+        logger.info('training_publication.chat_resolved', { ...this.fields(current, timezone, jobId), ...publicationTraceFields(trace), trainingId: current.id, configuredChatId: current.chatId, resolvedChatId: chat.id, chatTitle: chat.name, resolutionSource: 'training' });
         try {
-            return await this.publisher.publishExistingDraft(current.id);
+            return await this.publisher.publishExistingDraft(current.id, trace);
         } catch (error) {
-            logger.error('training_publication.telegram_send_failed', { ...this.fields(current, timezone, jobId), source, error });
+            logger.error('training_publication.telegram_send_failed', { ...this.fields(current, timezone, jobId), ...publicationTraceFields(trace), error });
             throw error;
         }
     }
